@@ -435,6 +435,8 @@ data class MediaMonitorUpdate(
     val activeSessionCount: Int,
     val eventType: MediaEventType,
     val observedAt: Long,
+    /** Monotonic callback timestamp used only for transition-latency diagnostics. */
+    val observedAtElapsedNanos: Long = 0L,
     val eventSequenceNumber: Long = 0L,
     val selectedSessionKey: String? = null,
     val callbackThread: String? = null,

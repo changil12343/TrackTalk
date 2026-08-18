@@ -2,12 +2,15 @@ package com.trackvoice.media
 
 import android.content.ComponentName
 import android.content.Context
+import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSession
 import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import com.trackvoice.diagnostics.TrackTalkDebugLog
 import com.trackvoice.service.TrackVoiceNotificationListenerService
 import java.util.Locale
@@ -85,17 +88,41 @@ class MediaSessionMonitor(
         }
     }
 
-    fun pauseSelectedIfPlaying(): PlaybackPauseToken? {
+    fun pauseSelectedIfPlaying(
+        expectedEvent: PlaybackEvent? = null,
+        expectedSessionKey: String? = null,
+        onPauseRequested: ((elapsedRealtimeNanos: Long) -> Unit)? = null,
+    ): PlaybackPauseToken? {
         // A new announcement owns the pause/resume lifecycle. Do not let a
         // delayed retry from a previous announcement play the track again.
         resumeRequestId += 1
         val tracked = selectedTrackedSession() ?: return null
-        val event = runCatching { mapper.map(tracked.controller) }.getOrNull() ?: return null
+        val event = if (expectedEvent != null) {
+            if (!matchesExpectedPlayingTrack(tracked.controller, expectedSessionKey, expectedEvent)) return null
+            expectedEvent
+        } else {
+            runCatching { mapper.map(tracked.controller) }.getOrNull() ?: return null
+        }
         if (!event.isPlaying || !event.hasTitle) return null
+        val pauseRequestedAtNanos = SystemClock.elapsedRealtimeNanos()
+        // Issue the media command before debug logging. The timestamp still
+        // marks the request boundary, while Logcat I/O can no longer delay the
+        // command that protects the opening of the confirmed track.
         val paused = runCatching {
             tracked.controller.transportControls.pause()
             true
         }.getOrDefault(false)
+        if (paused) {
+            // Diagnostics must never turn a successfully issued PAUSE into a
+            // missing resume token if a test/listener callback happens to fail.
+            runCatching { onPauseRequested?.invoke(pauseRequestedAtNanos) }
+            TrackTalkDebugLog.event(
+                "PLAYBACK_PAUSE_REQUESTED",
+                "elapsedRealtimeNanos" to pauseRequestedAtNanos,
+                "source" to event.sourcePackageName,
+                "mediaId" to event.mediaId,
+            )
+        }
         return if (paused) {
             PlaybackPauseToken(
                 sessionKey = sessionKey(tracked.controller),
@@ -251,6 +278,7 @@ class MediaSessionMonitor(
 
     private fun publish(eventType: MediaEventType, changedSessionKey: String? = null) {
         if (!started) return
+        val observedAtElapsedNanos = SystemClock.elapsedRealtimeNanos()
         val now = System.currentTimeMillis()
         val sequence = ++eventSequenceNumber
         TrackTalkDebugLog.event(
@@ -367,6 +395,7 @@ class MediaSessionMonitor(
                     activeSessionCount = sessions.size,
                     eventType = eventType,
                     observedAt = now,
+                    observedAtElapsedNanos = observedAtElapsedNanos,
                     eventSequenceNumber = sequence,
                     selectedSessionKey = selected?.sessionKey,
                     callbackThread = Thread.currentThread().name,
@@ -385,6 +414,48 @@ class MediaSessionMonitor(
     private fun trackedSession(token: PlaybackPauseToken): TrackedSession? =
         sessions[token.sessionKey]
             ?: sessions.values.firstOrNull { it.controller.packageName == token.sourcePackageName }
+
+    /**
+     * The controller has just accepted [expected] from this selected session.
+     * Re-reading and remapping the complete queue before PAUSE adds avoidable
+     * transition latency. Validate only the authoritative state and compact
+     * metadata identity here; a mismatch is a hard stop, never a reason to
+     * pause whichever newer track happens to be current.
+     */
+    private fun matchesExpectedPlayingTrack(
+        controller: MediaController,
+        expectedSessionKey: String?,
+        expected: PlaybackEvent,
+    ): Boolean {
+        if (!expected.isPlaying || !expected.hasTitle) return false
+        if (expectedSessionKey != null && sessionKey(controller) != expectedSessionKey) return false
+        if (controller.packageName != expected.sourcePackageName) return false
+        if (controller.playbackState?.state != PlaybackState.STATE_PLAYING) return false
+
+        val metadata = controller.metadata
+        val currentMediaId = metadata?.getString(MediaMetadata.METADATA_KEY_MEDIA_ID).normalizedIdentity()
+        val expectedMediaId = expected.mediaId.normalizedIdentity()
+        if (currentMediaId.isNotBlank() && expectedMediaId.isNotBlank() && currentMediaId != expectedMediaId) {
+            return false
+        }
+
+        val currentTitle = (
+            metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)
+                ?: metadata?.getString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE)
+            ).normalizedIdentity()
+        val expectedTitle = expected.title.normalizedIdentity()
+        if (currentTitle.isNotBlank() && expectedTitle.isNotBlank() && currentTitle != expectedTitle) return false
+
+        val currentArtist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST).normalizedIdentity()
+        val expectedArtist = expected.artist.normalizedIdentity()
+        return currentArtist.isBlank() || expectedArtist.isBlank() || currentArtist == expectedArtist
+    }
+
+    private fun String?.normalizedIdentity(): String = this
+        ?.trim()
+        ?.lowercase(Locale.ROOT)
+        ?.replace(Regex("\\s+"), " ")
+        .orEmpty()
 
     private fun retryResume(
         token: PlaybackPauseToken,

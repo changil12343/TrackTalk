@@ -5,6 +5,7 @@ import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import com.trackvoice.data.GenderFilter
@@ -130,6 +131,7 @@ class TtsEngine(context: Context) {
         text: String,
         settings: UserSettings,
         transitionAtMs: Long? = null,
+        transitionAtElapsedNanos: Long? = null,
         voiceNameOverride: String? = null,
         onFinished: (success: Boolean, message: DiagnosticMessage) -> Unit,
     ) {
@@ -154,6 +156,7 @@ class TtsEngine(context: Context) {
             }
             pendingResults.clear()
             utteranceTransitionAtMs.clear()
+            utteranceTransitionAtElapsedNanos.clear()
             runCatching { ttsProvider.stop() }
             val supportedLocales = runCatching { ttsProvider.supportedLocales() }
                 .getOrDefault(emptySet())
@@ -194,6 +197,7 @@ class TtsEngine(context: Context) {
                 val utteranceId = "trackvoice-${System.nanoTime()}-$index"
                 pendingResults[utteranceId] = batch
                 utteranceTransitionAtMs[utteranceId] = transitionAtMs
+                utteranceTransitionAtElapsedNanos[utteranceId] = transitionAtElapsedNanos
                 val result = runCatching { ttsProvider.speak(
                     segment.text,
                     if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
@@ -294,6 +298,7 @@ class TtsEngine(context: Context) {
             runCatching { ttsProvider.shutdown() }
             pendingResults.clear()
             utteranceTransitionAtMs.clear()
+            utteranceTransitionAtElapsedNanos.clear()
             _state.value = TtsState(TtsStatus.CLOSED, DiagnosticMessage.TTS_CLOSED)
         }
     }
@@ -306,13 +311,21 @@ class TtsEngine(context: Context) {
 
     private val pendingResults = mutableMapOf<String, PendingBatch>()
     private val utteranceTransitionAtMs = mutableMapOf<String, Long?>()
+    private val utteranceTransitionAtElapsedNanos = mutableMapOf<String, Long?>()
 
     private val progressListener = object : UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) {
+            val startedAtNanos = SystemClock.elapsedRealtimeNanos()
             TrackTalkDebugLog.event("tts_start", "utteranceId" to utteranceId)
             TrackTalkDebugLog.event(
                 "TTS_STARTED",
                 "utteranceId" to utteranceId,
+                "elapsedRealtimeNanos" to startedAtNanos,
+                "transitionToTtsStartMonotonicMs" to utteranceId?.let { id ->
+                    utteranceTransitionAtElapsedNanos[id]?.let { startAt ->
+                        (startedAtNanos - startAt).coerceAtLeast(0L) / 1_000_000.0
+                    }
+                },
                 "transitionToTtsStartMs" to utteranceId?.let { id ->
                     utteranceTransitionAtMs[id]?.let { startAt -> System.currentTimeMillis() - startAt }
                 },
@@ -325,6 +338,7 @@ class TtsEngine(context: Context) {
             mainHandler.post {
                 val batch = pendingResults.remove(utteranceId) ?: return@post
                 utteranceTransitionAtMs.remove(utteranceId)
+                utteranceTransitionAtElapsedNanos.remove(utteranceId)
                 batch.remaining -= 1
                 if (batch.remaining == 0 && !batch.completed) {
                     batch.completed = true
@@ -343,6 +357,7 @@ class TtsEngine(context: Context) {
             TrackTalkDebugLog.event("tts_error", "utteranceId" to utteranceId)
             mainHandler.post {
                 utteranceTransitionAtMs.remove(utteranceId)
+                utteranceTransitionAtElapsedNanos.remove(utteranceId)
                 pendingResults[utteranceId]?.let { failBatch(it, DiagnosticMessage.TTS_PLAYBACK_ERROR) }
             }
         }
@@ -352,6 +367,7 @@ class TtsEngine(context: Context) {
             TrackTalkDebugLog.event("tts_error", "utteranceId" to utteranceId, "errorCode" to errorCode)
             mainHandler.post {
                 utteranceTransitionAtMs.remove(utteranceId)
+                utteranceTransitionAtElapsedNanos.remove(utteranceId)
                 pendingResults[utteranceId]?.let { failBatch(it, DiagnosticMessage.TTS_PLAYBACK_ERROR) }
             }
         }
@@ -361,6 +377,7 @@ class TtsEngine(context: Context) {
         if (batch.completed) return
         batch.completed = true
         pendingResults.filterValues { it === batch }.keys.forEach(utteranceTransitionAtMs::remove)
+        pendingResults.filterValues { it === batch }.keys.forEach(utteranceTransitionAtElapsedNanos::remove)
         pendingResults.entries.removeAll { it.value === batch }
         runCatching { ttsProvider.stop() }
         runCatching { batch.callback(false, message) }

@@ -13,17 +13,22 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.trackvoice.service.TrackVoiceNotificationListenerService
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(AndroidJUnit4::class)
 class MediaSessionMonitorInstrumentedTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val pauseCommandCount = AtomicInteger(0)
     private lateinit var session: MediaSession
 
     @Before
@@ -44,6 +49,7 @@ class MediaSessionMonitorInstrumentedTest {
         session = MediaSession(context, "TrackTalkMonitorInstrumentationTest")
         session.setCallback(object : MediaSession.Callback() {
             override fun onPause() {
+                pauseCommandCount.incrementAndGet()
                 // Simulate a media app that publishes PAUSED after its command
                 // callback. This is the race that used to lose auto-resume.
                 mainHandler.postDelayed({ setState(PlaybackState.STATE_PAUSED) }, 350L)
@@ -113,6 +119,78 @@ class MediaSessionMonitorInstrumentedTest {
             waitUntil(timeoutMs = 2_500L) {
                 MediaController(context, session.sessionToken).playbackState?.state == PlaybackState.STATE_PLAYING
             }
+            assertTrue(monitor.isSelectedPlaybackPlaying() == true)
+        } finally {
+            monitor.stop()
+        }
+    }
+
+    @Test
+    fun confirmedTrackFastPathPausesTheExpectedSessionOnce() {
+        val latest = AtomicReference<MediaMonitorUpdate>()
+        val monitor = MediaSessionMonitor(context, latest::set)
+        monitor.start()
+        try {
+            waitUntil { latest.get()?.selected?.event?.mediaId == "delayed-resume-test" }
+            val selected = latest.get().selected!!
+
+            val token = monitor.pauseSelectedIfPlaying(
+                expectedEvent = selected.event,
+                expectedSessionKey = selected.sessionKey,
+            )
+
+            assertNotNull(token)
+            waitUntil { pauseCommandCount.get() == 1 }
+            assertEquals(1, pauseCommandCount.get())
+        } finally {
+            monitor.stop()
+        }
+    }
+
+    @Test
+    fun diagnosticCallbackFailureDoesNotLosePauseToken() {
+        val latest = AtomicReference<MediaMonitorUpdate>()
+        val monitor = MediaSessionMonitor(context, latest::set)
+        monitor.start()
+        try {
+            waitUntil { latest.get()?.selected?.event?.mediaId == "delayed-resume-test" }
+            val selected = latest.get().selected!!
+
+            val token = monitor.pauseSelectedIfPlaying(
+                expectedEvent = selected.event,
+                expectedSessionKey = selected.sessionKey,
+                onPauseRequested = { error("diagnostic callback failure") },
+            )
+
+            assertNotNull(token)
+            waitUntil { pauseCommandCount.get() == 1 }
+            assertEquals(1, pauseCommandCount.get())
+        } finally {
+            monitor.stop()
+        }
+    }
+
+    @Test
+    fun staleConfirmedTrackNeverPausesAReplacementTrack() {
+        val latest = AtomicReference<MediaMonitorUpdate>()
+        val monitor = MediaSessionMonitor(context, latest::set)
+        monitor.start()
+        try {
+            waitUntil { latest.get()?.selected?.event?.mediaId == "delayed-resume-test" }
+            val selected = latest.get().selected!!
+            val staleEvent = selected.event.copy(
+                mediaId = "stale-media-id",
+                title = "Stale title",
+            )
+
+            val token = monitor.pauseSelectedIfPlaying(
+                expectedEvent = staleEvent,
+                expectedSessionKey = selected.sessionKey,
+            )
+
+            assertNull(token)
+            SystemClock.sleep(200L)
+            assertEquals(0, pauseCommandCount.get())
             assertTrue(monitor.isSelectedPlaybackPlaying() == true)
         } finally {
             monitor.stop()

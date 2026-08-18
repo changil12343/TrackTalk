@@ -12,6 +12,8 @@ import com.trackvoice.announcement.RepeatCycleDetector
 import com.trackvoice.announcement.AudioDeviceMonitor
 import com.trackvoice.announcement.AnnouncementPlaybackPlanner
 import com.trackvoice.announcement.AnnouncementAudioTiming
+import com.trackvoice.announcement.NextTrackAnnouncementPreparation
+import com.trackvoice.announcement.PreparedNextAnnouncement
 import com.trackvoice.announcement.ConnectedAudioDevice
 import com.trackvoice.announcement.LegacyMusicVolumeRecovery
 import com.trackvoice.announcement.InstalledVoice
@@ -35,6 +37,7 @@ import android.content.Intent
 import android.service.media.MediaBrowserService
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import com.trackvoice.media.MediaEventType
 import com.trackvoice.media.MediaMonitorUpdate
 import com.trackvoice.media.MediaSessionMonitor
@@ -111,6 +114,10 @@ private fun PlaybackEvent.logicalIdentity(): String = listOf(
     artist.orEmpty().trim(),
     album.orEmpty().trim(),
 ).joinToString("|")
+
+private fun Long?.elapsedMillisUntil(endElapsedNanos: Long): Double? = this?.let { start ->
+    (endElapsedNanos - start).coerceAtLeast(0L) / 1_000_000.0
+}
 
 /** A route retry must never resume an announcement for a different app or track. */
 internal fun isRouteRetryStillCurrent(
@@ -195,6 +202,7 @@ class TrackVoiceController(
     private var pendingAnnouncementToken = 0L
     private var preparedAnnouncement: PreparedAnnouncement? = null
     private var preparedNextTrack: PreparedNextTrack? = null
+    private var preparedNextAnnouncement: PreparedNextAnnouncement? = null
     private var monitor: MediaSessionMonitor? = null
     private var pausedPlayback: PlaybackPauseToken? = null
     private var activeSpeechTrack: PlaybackEvent? = null
@@ -208,6 +216,10 @@ class TrackVoiceController(
     private var hardPlaybackBoundarySessionKey: String? = null
     private var hardPlaybackBoundaryAllowsSameSession = false
     private var lastActualTrackChangeAtMs: Long? = null
+    private var lastActualTrackChangeAtElapsedNanos: Long? = null
+    private var lastActualTrackChangeUsedPrefetch = false
+    private var pausedObservedForTransitionAtElapsedNanos: Long? = null
+    private var activeSpeechTransitionAtElapsedNanos: Long? = null
     private var monitorGeneration = 0L
     private var logicalSessionGeneration = 0L
     private var speechGeneration = 0L
@@ -503,17 +515,33 @@ class TrackVoiceController(
         fingerprint: String,
         pendingToken: Long,
         transitionAtMs: Long? = null,
+        transitionAtElapsedNanos: Long? = null,
     ) {
         if (!isPendingAnnouncement(pendingToken, fingerprint)) return
         if (preparedAnnouncement?.fingerprint != fingerprint || preparedAnnouncement?.token != pendingToken) return
         preparedAnnouncement = null
         activeSpeechTrack = track
+        activeSpeechTransitionAtElapsedNanos = transitionAtElapsedNanos
         val generation = ++speechGeneration
         val settings = effectiveSettings()
-        ttsEngine.speak(text, settings, transitionAtMs = transitionAtMs) { success, message ->
+        ttsEngine.speak(
+            text,
+            settings,
+            transitionAtMs = transitionAtMs,
+            transitionAtElapsedNanos = transitionAtElapsedNanos,
+        ) { success, message ->
             if (generation == speechGeneration) {
                 activeSpeechTrack = null
-                finishAnnouncementAudio()
+                val completedAtNanos = SystemClock.elapsedRealtimeNanos()
+                TrackTalkDebugLog.event(
+                    "TRANSITION_TIMING",
+                    "stage" to "T7_TTS_COMPLETED",
+                    "elapsedRealtimeNanos" to completedAtNanos,
+                    "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(completedAtNanos),
+                    "mediaId" to track.mediaId,
+                )
+                finishAnnouncementAudio(transitionAtElapsedNanos)
+                activeSpeechTransitionAtElapsedNanos = null
                 _diagnostics.value = _diagnostics.value.copy(
                     lastAnnouncementAt = System.currentTimeMillis(),
                     lastAnnouncementSucceeded = success,
@@ -542,10 +570,15 @@ class TrackVoiceController(
         lastAnnouncedSessionKey = null
         selectedSessionKey = null
         lastActualTrackChangeAtMs = null
+        lastActualTrackChangeAtElapsedNanos = null
+        lastActualTrackChangeUsedPrefetch = false
+        pausedObservedForTransitionAtElapsedNanos = null
+        activeSpeechTransitionAtElapsedNanos = null
         hardPlaybackBoundaryPending = false
         hardPlaybackBoundarySessionKey = null
         hardPlaybackBoundaryAllowsSameSession = false
         preparedNextTrack = null
+        preparedNextAnnouncement = null
         externalMetadataLookupJobs.values.forEach(Job::cancel)
         externalMetadataLookupJobs.clear()
         externalMetadataCache.clear()
@@ -674,6 +707,8 @@ class TrackVoiceController(
             )
         }
         val previousEvent = _mediaState.value.currentEvent
+        var transitionObservation: TransitionObservation? = null
+        var prefetchedAnnouncementText: String? = null
         val resumedAfterHardPlaybackBoundary = hardPlaybackBoundaryPending && (
             hardPlaybackBoundaryAllowsSameSession ||
                 hardPlaybackBoundarySessionKey == null ||
@@ -688,40 +723,44 @@ class TrackVoiceController(
             )
         if (actualTrackChange) {
             val actualTrackChangeAtMs = System.currentTimeMillis()
+            val actualTrackChangeAtElapsedNanos = update.observedAtElapsedNanos
+                .takeIf { it > 0L }
+                ?: SystemClock.elapsedRealtimeNanos()
             lastActualTrackChangeAtMs = actualTrackChangeAtMs
-            TrackTalkDebugLog.event(
-                "ACTUAL_TRACK_CHANGE_DETECTED",
-                "source" to event?.sourcePackageName,
-                "previousTitle" to previousEvent?.title,
-                "currentTitle" to event?.title,
-                "previousMediaId" to previousEvent?.mediaId,
-                "currentMediaId" to event?.mediaId,
-                "eventType" to update.eventType,
-                "observedAt" to event?.observedAt,
-                "detectedAtMs" to actualTrackChangeAtMs,
-                "deltaSincePreviousObservedMs" to event?.observedAt?.minus(previousEvent?.observedAt ?: event.observedAt),
-                "sessionKey" to incomingSessionKey,
-            )
+            lastActualTrackChangeAtElapsedNanos = actualTrackChangeAtElapsedNanos
+            pausedObservedForTransitionAtElapsedNanos = null
             val prepared = preparedNextTrack
+            var prefetchMatched = false
             if (prepared != null) {
                 val actualEvent = event ?: return
                 if (NextTrackPrefetch.matches(prepared, actualEvent, incomingSessionKey)) {
+                    prefetchMatched = true
                     event = NextTrackPrefetch.mergeMissingMetadata(prepared, actualEvent)
-                    TrackTalkDebugLog.event(
-                        "PREFETCH_MATCH",
-                        "source" to actualEvent.sourcePackageName,
-                        "queueItemId" to prepared.predicted.queueItemId,
-                        "title" to prepared.title,
-                        "quality" to prepared.quality,
-                        "metadataMerged" to true,
-                        "preparedAt" to prepared.preparedAt,
-                        "transitionObservedAt" to actualEvent.observedAt,
-                        "transitionToMergeMs" to System.currentTimeMillis() - prepared.preparedAt,
-                    )
+                    prefetchedAnnouncementText = preparedNextAnnouncement?.let { preparedAnnouncement ->
+                        NextTrackAnnouncementPreparation.reusableText(
+                            prepared = preparedAnnouncement,
+                            actual = event ?: actualEvent,
+                            sessionKey = incomingSessionKey,
+                            settings = settings,
+                        )
+                    }
                 } else {
                     invalidatePreparedNextTrack("ACTUAL_TRACK_MISMATCH")
                 }
             }
+            val identityResolvedAtNanos = SystemClock.elapsedRealtimeNanos()
+            lastActualTrackChangeUsedPrefetch = prefetchMatched
+            transitionObservation = TransitionObservation(
+                transitionAtMs = actualTrackChangeAtMs,
+                transitionAtElapsedNanos = actualTrackChangeAtElapsedNanos,
+                identityResolvedAtElapsedNanos = identityResolvedAtNanos,
+                eventSequenceNumber = update.eventSequenceNumber,
+                eventType = update.eventType,
+                sessionKey = incomingSessionKey,
+                previousEvent = previousEvent,
+                currentEvent = event ?: return,
+                matchedPrefetch = prepared.takeIf { prefetchMatched },
+            )
         } else if (preparedNextTrack != null && event != null &&
             !NextTrackPrefetch.anchorMatches(preparedNextTrack!!, event, incomingSessionKey)
         ) {
@@ -907,8 +946,8 @@ class TrackVoiceController(
             )
         }
         val newPlaybackOccurrence = actualTrackChange || resumedAfterHardPlaybackBoundary
-        refreshPreparedNextTrack(event, incomingSessionKey)
         if (!event.isPlaying) {
+            refreshPreparedNextTrack(event, incomingSessionKey)
             // A media session commonly reports PAUSED while audio focus is
             // moving to TTS. Once preparation or speech has been committed,
             // keep that batch alive; otherwise a real user pause still cancels
@@ -924,6 +963,23 @@ class TrackVoiceController(
                                 AnnouncementTrackMatcher.matches(it, event, requireSameSource = false)
                             } == true
                         )
+            val transitionAtElapsedNanos = lastActualTrackChangeAtElapsedNanos
+                ?: activeSpeechTransitionAtElapsedNanos
+            if (
+                sameCommittedAnnouncement &&
+                transitionAtElapsedNanos != null &&
+                pausedObservedForTransitionAtElapsedNanos != transitionAtElapsedNanos
+            ) {
+                val pausedObservedAtNanos = SystemClock.elapsedRealtimeNanos()
+                pausedObservedForTransitionAtElapsedNanos = transitionAtElapsedNanos
+                TrackTalkDebugLog.event(
+                    "TRANSITION_TIMING",
+                    "stage" to "T4_PLAYBACK_PAUSED_OBSERVED",
+                    "elapsedRealtimeNanos" to pausedObservedAtNanos,
+                    "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(pausedObservedAtNanos),
+                    "mediaId" to event.mediaId,
+                )
+            }
             if (!sameCommittedAnnouncement) cancelPendingAnnouncement()
             TrackTalkDebugLog.event(
                 "announcement_pause_state",
@@ -931,6 +987,7 @@ class TrackVoiceController(
                 "mediaId" to event.mediaId,
                 "title" to event.title,
             )
+            logTransitionObservation(transitionObservation)
             return
         }
         scheduleAnnouncement(
@@ -942,6 +999,65 @@ class TrackVoiceController(
             isNewRepeatCycle = newRepeatOneCycle,
             eventSequenceNumber = update.eventSequenceNumber,
             logicalSessionGeneration = logicalSessionGeneration,
+            preparedText = prefetchedAnnouncementText,
+        )
+        // Debug diagnostics are intentionally emitted after the immediate
+        // pause request. Their timestamps still describe T0/T1 precisely, but
+        // Logcat I/O cannot lengthen the audible transition window.
+        logTransitionObservation(transitionObservation)
+        // Preparing the following queue item is predictive work. Keep it out
+        // of the confirmed transition's pause-critical path; it still runs
+        // immediately after this track has been admitted or suppressed.
+        refreshPreparedNextTrack(event, incomingSessionKey)
+    }
+
+    private fun logTransitionObservation(observation: TransitionObservation?) {
+        observation ?: return
+        val current = observation.currentEvent
+        val previous = observation.previousEvent
+        TrackTalkDebugLog.event(
+            "TRANSITION_TIMING",
+            "stage" to "T0_TRANSITION_CONFIRMED",
+            "elapsedRealtimeNanos" to observation.transitionAtElapsedNanos,
+            "eventSequenceNumber" to observation.eventSequenceNumber,
+            "mediaId" to current.mediaId,
+        )
+        TrackTalkDebugLog.event(
+            "ACTUAL_TRACK_CHANGE_DETECTED",
+            "source" to current.sourcePackageName,
+            "previousTitle" to previous.title,
+            "currentTitle" to current.title,
+            "previousMediaId" to previous.mediaId,
+            "currentMediaId" to current.mediaId,
+            "eventType" to observation.eventType,
+            "observedAt" to current.observedAt,
+            "detectedAtMs" to observation.transitionAtMs,
+            "deltaSincePreviousObservedMs" to (current.observedAt - previous.observedAt),
+            "sessionKey" to observation.sessionKey,
+        )
+        observation.matchedPrefetch?.let { prepared ->
+            TrackTalkDebugLog.event(
+                "PREFETCH_MATCH",
+                "source" to current.sourcePackageName,
+                "queueItemId" to prepared.predicted.queueItemId,
+                "title" to prepared.title,
+                "quality" to prepared.quality,
+                "metadataMerged" to true,
+                "preparedAt" to prepared.preparedAt,
+                "transitionObservedAt" to current.observedAt,
+                "transitionToMergeMs" to observation.transitionAtMs - prepared.preparedAt,
+            )
+        }
+        TrackTalkDebugLog.event(
+            "TRANSITION_TIMING",
+            "stage" to "T1_IDENTITY_RESOLVED",
+            "elapsedRealtimeNanos" to observation.identityResolvedAtElapsedNanos,
+            "transitionElapsedMs" to observation.transitionAtElapsedNanos.elapsedMillisUntil(
+                observation.identityResolvedAtElapsedNanos,
+            ),
+            "prefetched" to (observation.matchedPrefetch != null),
+            "eventSequenceNumber" to observation.eventSequenceNumber,
+            "mediaId" to current.mediaId,
         )
     }
 
@@ -1031,6 +1147,7 @@ class TrackVoiceController(
         logicalSessionGeneration: Long = 0L,
         routeRetryAttempt: Int = 0,
         routeResolutionOverride: AudioRouteResolution? = null,
+        preparedText: String? = null,
     ) {
         val settings = effectiveSettings()
         val app = appSettingsFor(event)
@@ -1054,57 +1171,18 @@ class TrackVoiceController(
             effectiveEnabled = settings.enabled || screenAutoActivated || deviceAutoActivated,
             externalAudioOutput = externalOutput,
             collectionOverride = collection,
+            preparedText = preparedText,
         )
-        val configuration = AnnouncementPolicy.resolveConfiguration(settings, collection)
-        TrackTalkDebugLog.event(
-            "CONTENT_TYPE",
-            "mediaId" to event.mediaId,
-            "resolved" to collection,
-            "source" to configuration.source,
-        )
-        TrackTalkDebugLog.event(
-            "ANNOUNCEMENT_CONFIG",
-            "source" to configuration.source,
-            "selected" to decision.formatOptions.orderedFields?.joinToString(","),
-            "legacyOrder" to decision.formatOptions.announcementOrder,
-            "mode" to decision.mode,
-        )
-        TrackTalkDebugLog.event(
-            "announcement_policy",
-            "mediaId" to event.mediaId,
-            "title" to event.title,
-            "collection" to decision.collection,
-            "mode" to decision.mode,
-            "appEnabled" to app.enabled,
-            "appOverride" to app.enabledOverride,
-            "appDefault" to AppGuideEnablementPolicy.defaultEnabled(
-                event.sourcePackageName,
-                event.sourceAppName,
-            ),
-            "shouldAnnounce" to decision.shouldAnnounce,
-            "skipReason" to decision.skipReason,
-            "delayMs" to decision.delayMs,
-            "routeResolution" to routeResolution.state,
-            "routeReason" to routeResolution.reason,
-            "routeRetryAttempt" to routeRetryAttempt,
-        )
-        TrackTalkDebugLog.event(
-            "ANNOUNCEMENT_DECISION",
-            "stage" to "INITIAL",
-            "mediaId" to event.mediaId,
-            "shouldAnnounce" to decision.shouldAnnounce,
-            "skipReason" to decision.skipReason,
-            "textAvailable" to (decision.text != null),
-            "routeResolution" to routeResolution.state,
-        )
-        if (decision.shouldAnnounce) {
-            logAnnouncementComponents(
-                event = event,
-                decision = decision,
-                action = if (needsMetadataSettlement(event, decision)) "WAIT_FOR_METADATA" else "READY",
-            )
-        }
         if (!decision.shouldAnnounce || decision.text == null) {
+            logInitialAnnouncementDecision(
+                event = event,
+                collection = collection,
+                settings = settings,
+                app = app,
+                decision = decision,
+                routeResolution = routeResolution,
+                routeRetryAttempt = routeRetryAttempt,
+            )
             cancelPendingAnnouncement()
             return
         }
@@ -1203,19 +1281,6 @@ class TrackVoiceController(
             )
             return
         }
-        TrackTalkDebugLog.event(
-            "DUPLICATE_STATE_READ",
-            "stage" to "DECISION",
-            "historyPresent" to (lastAnnouncedTrack != null),
-            "logicalTrack" to event.logicalIdentity(),
-            "sameLogicalTrack" to (lastAnnouncedTrack?.let {
-                AnnouncementTrackMatcher.matchesForDuplicateSuppression(it, event, requireSameSource = true)
-            } == true),
-            "sameLogicalSession" to (lastAnnouncedSessionKey != null && lastAnnouncedSessionKey == sessionKey),
-            "samePackage" to (lastAnnouncedTrack?.sourcePackageName == event.sourcePackageName),
-            "eventSequenceNumber" to eventSequenceNumber,
-            "logicalSessionGeneration" to logicalSessionGeneration,
-        )
         if (!duplicateSuppressor.shouldAnnounce(
             event = event,
             allowRepeat = settings.allowRepeatAnnouncements,
@@ -1258,6 +1323,8 @@ class TrackVoiceController(
             return
         }
 
+        val transitionAtElapsedNanos = lastActualTrackChangeAtElapsedNanos
+        val eligibilityResolvedAtNanos = SystemClock.elapsedRealtimeNanos()
         cancelPendingAnnouncement()
         pendingAnnouncementEvent = event
         val pendingToken = ++pendingAnnouncementToken
@@ -1272,6 +1339,54 @@ class TrackVoiceController(
             scheduledDelayMs = scheduledDelayMs,
             decisionDelayMs = decision.delayMs,
         )
+        pendingFingerprints += fingerprint
+        if (preparationDelayMs == 0L) {
+            // Immediate mode has already passed route, entitlement, duplicate,
+            // and current-track eligibility. Commit the batch before PAUSE so
+            // its resulting callback cannot cancel this announcement, then
+            // request audio protection without another coroutine dispatch.
+            preparedAnnouncement = PreparedAnnouncement(fingerprint, pendingToken)
+            if (!prepareAnnouncementAudio(settings, event, sessionKey, transitionAtElapsedNanos)) {
+                if (preparedAnnouncement?.fingerprint == fingerprint) releasePreparedAnnouncement()
+                pendingFingerprints -= fingerprint
+                if (pendingAnnouncementToken == pendingToken) pendingAnnouncementEvent = null
+                return
+            }
+            if (!isPendingAnnouncement(pendingToken, fingerprint)) {
+                finishAnnouncementAudio()
+                return
+            }
+        }
+        logInitialAnnouncementDecision(
+            event = event,
+            collection = collection,
+            settings = settings,
+            app = app,
+            decision = decision,
+            routeResolution = routeResolution,
+            routeRetryAttempt = routeRetryAttempt,
+        )
+        logAnnouncementComponents(
+            event = event,
+            decision = decision,
+            action = if (needsMetadataSettlement(event, decision)) "WAIT_FOR_METADATA" else "READY",
+        )
+        logDuplicateStateRead(
+            event = event,
+            sessionKey = sessionKey,
+            eventSequenceNumber = eventSequenceNumber,
+            logicalSessionGeneration = logicalSessionGeneration,
+        )
+        TrackTalkDebugLog.event(
+            "TRANSITION_TIMING",
+            "stage" to "T2_ELIGIBILITY_RESOLVED",
+            "elapsedRealtimeNanos" to eligibilityResolvedAtNanos,
+            "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(eligibilityResolvedAtNanos),
+            "prefetched" to lastActualTrackChangeUsedPrefetch,
+            "preparedTextReused" to (preparedText != null),
+            "eventSequenceNumber" to eventSequenceNumber,
+            "mediaId" to event.mediaId,
+        )
         TrackTalkDebugLog.event(
             "announcement_scheduled",
             "mediaId" to event.mediaId,
@@ -1283,7 +1398,6 @@ class TrackVoiceController(
             "eventSequenceNumber" to eventSequenceNumber,
             "logicalSessionGeneration" to logicalSessionGeneration,
         )
-        pendingFingerprints += fingerprint
         pendingJob = scope.launch {
             try {
                 if (preparationDelayMs > 0L) delay(preparationDelayMs)
@@ -1294,7 +1408,7 @@ class TrackVoiceController(
                     // produce a PAUSED callback; without this marker that
                     // callback cancels the very job that caused it.
                     preparedAnnouncement = PreparedAnnouncement(fingerprint, pendingToken)
-                    if (!prepareAnnouncementAudio(settings, event)) {
+                    if (!prepareAnnouncementAudio(settings, event, sessionKey, transitionAtElapsedNanos)) {
                         if (preparedAnnouncement?.fingerprint == fingerprint) {
                             releasePreparedAnnouncement()
                         }
@@ -1386,6 +1500,7 @@ class TrackVoiceController(
                     }
                 }
                 val transitionAtMs = lastActualTrackChangeAtMs
+                val ttsRequestedAtNanos = SystemClock.elapsedRealtimeNanos()
                 TrackTalkDebugLog.event(
                     "TTS_REQUESTED",
                     "mediaId" to eventForSpeech.mediaId,
@@ -1395,13 +1510,26 @@ class TrackVoiceController(
                     "observedAt" to eventForSpeech.observedAt,
                     "elapsedSinceObservedMs" to (announcedAt - eventForSpeech.observedAt),
                     "transitionToTtsRequestMs" to transitionAtMs?.let { announcedAt - it },
+                    "elapsedRealtimeNanos" to ttsRequestedAtNanos,
+                    "transitionToTtsRequestMonotonicMs" to transitionAtElapsedNanos.elapsedMillisUntil(ttsRequestedAtNanos),
                     "collection" to currentDecision.collection,
                     "mode" to currentDecision.mode,
                     "eventSequenceNumber" to eventSequenceNumber,
                     "logicalSessionGeneration" to logicalSessionGeneration,
                 )
-                speakPrepared(currentDecision.text, eventForSpeech, fingerprint, pendingToken, transitionAtMs)
+                speakPrepared(
+                    currentDecision.text,
+                    eventForSpeech,
+                    fingerprint,
+                    pendingToken,
+                    transitionAtMs,
+                    transitionAtElapsedNanos,
+                )
                 if (transitionAtMs != null) lastActualTrackChangeAtMs = null
+                if (transitionAtElapsedNanos != null) {
+                    lastActualTrackChangeAtElapsedNanos = null
+                    lastActualTrackChangeUsedPrefetch = false
+                }
             } finally {
                 if (pendingAnnouncementToken == pendingToken) {
                     pendingFingerprints -= fingerprint
@@ -1587,6 +1715,80 @@ class TrackVoiceController(
                 ),
             )
 
+    private fun logInitialAnnouncementDecision(
+        event: PlaybackEvent,
+        collection: PlaybackCollection,
+        settings: UserSettings,
+        app: AppSettings,
+        decision: com.trackvoice.announcement.AnnouncementDecision,
+        routeResolution: AudioRouteResolution,
+        routeRetryAttempt: Int,
+    ) {
+        val configuration = AnnouncementPolicy.resolveConfiguration(settings, collection)
+        TrackTalkDebugLog.event(
+            "CONTENT_TYPE",
+            "mediaId" to event.mediaId,
+            "resolved" to collection,
+            "source" to configuration.source,
+        )
+        TrackTalkDebugLog.event(
+            "ANNOUNCEMENT_CONFIG",
+            "source" to configuration.source,
+            "selected" to decision.formatOptions.orderedFields?.joinToString(","),
+            "legacyOrder" to decision.formatOptions.announcementOrder,
+            "mode" to decision.mode,
+        )
+        TrackTalkDebugLog.event(
+            "announcement_policy",
+            "mediaId" to event.mediaId,
+            "title" to event.title,
+            "collection" to decision.collection,
+            "mode" to decision.mode,
+            "appEnabled" to app.enabled,
+            "appOverride" to app.enabledOverride,
+            "appDefault" to AppGuideEnablementPolicy.defaultEnabled(
+                event.sourcePackageName,
+                event.sourceAppName,
+            ),
+            "shouldAnnounce" to decision.shouldAnnounce,
+            "skipReason" to decision.skipReason,
+            "delayMs" to decision.delayMs,
+            "routeResolution" to routeResolution.state,
+            "routeReason" to routeResolution.reason,
+            "routeRetryAttempt" to routeRetryAttempt,
+        )
+        TrackTalkDebugLog.event(
+            "ANNOUNCEMENT_DECISION",
+            "stage" to "INITIAL",
+            "mediaId" to event.mediaId,
+            "shouldAnnounce" to decision.shouldAnnounce,
+            "skipReason" to decision.skipReason,
+            "textAvailable" to (decision.text != null),
+            "routeResolution" to routeResolution.state,
+        )
+    }
+
+    private fun logDuplicateStateRead(
+        event: PlaybackEvent,
+        sessionKey: String?,
+        eventSequenceNumber: Long,
+        logicalSessionGeneration: Long,
+    ) {
+        TrackTalkDebugLog.event(
+            "DUPLICATE_STATE_READ",
+            "stage" to "DECISION",
+            "historyPresent" to (lastAnnouncedTrack != null),
+            "logicalTrack" to event.logicalIdentity(),
+            "sameLogicalTrack" to (lastAnnouncedTrack?.let {
+                AnnouncementTrackMatcher.matchesForDuplicateSuppression(it, event, requireSameSource = true)
+            } == true),
+            "sameLogicalSession" to (lastAnnouncedSessionKey != null && lastAnnouncedSessionKey == sessionKey),
+            "samePackage" to (lastAnnouncedTrack?.sourcePackageName == event.sourcePackageName),
+            "eventSequenceNumber" to eventSequenceNumber,
+            "logicalSessionGeneration" to logicalSessionGeneration,
+        )
+    }
+
     private fun needsMetadataSettlement(
         event: PlaybackEvent,
         decision: com.trackvoice.announcement.AnnouncementDecision,
@@ -1699,7 +1901,12 @@ class TrackVoiceController(
      * MediaSession callbacks arrive after playback has started, so doing this
      * here removes the additional gap before TTS takes over.
      */
-    private fun prepareAnnouncementAudio(settings: UserSettings, event: PlaybackEvent? = pendingAnnouncementEvent): Boolean {
+    private fun prepareAnnouncementAudio(
+        settings: UserSettings,
+        event: PlaybackEvent? = pendingAnnouncementEvent,
+        sessionKey: String? = selectedSessionKey,
+        transitionAtElapsedNanos: Long? = lastActualTrackChangeAtElapsedNanos,
+    ): Boolean {
         val preparationStartedAt = System.currentTimeMillis()
         val plan = AnnouncementPlaybackPlanner.plan(settings)
         if (!plan.pauseBeforeAnnouncement) {
@@ -1709,7 +1916,18 @@ class TrackVoiceController(
         }
         audioFocusManager.abandon()
         if (pausedPlayback == null && plan.pauseBeforeAnnouncement) {
-            pausedPlayback = monitor?.pauseSelectedIfPlaying()
+            pausedPlayback = monitor?.pauseSelectedIfPlaying(
+                expectedEvent = event,
+                expectedSessionKey = sessionKey,
+            ) { pauseRequestedAtNanos ->
+                TrackTalkDebugLog.event(
+                    "TRANSITION_TIMING",
+                    "stage" to "T3_PAUSE_REQUESTED",
+                    "elapsedRealtimeNanos" to pauseRequestedAtNanos,
+                    "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(pauseRequestedAtNanos),
+                    "mediaId" to event?.mediaId,
+                )
+            }
         }
         TrackTalkDebugLog.event(
             "audio_protection",
@@ -1760,10 +1978,14 @@ class TrackVoiceController(
             if (previous != null) invalidatePreparedNextTrack("NO_USABLE_NEXT_ITEM")
             return
         }
-        if (previous != null && NextTrackPrefetch.samePrediction(previous, candidate)) return
+        if (previous != null && NextTrackPrefetch.samePrediction(previous, candidate)) {
+            preparedNextAnnouncement = NextTrackAnnouncementPreparation.prepare(candidate, effectiveSettings())
+            return
+        }
 
         if (previous != null) invalidatePreparedNextTrack("QUEUE_OR_NEXT_ITEM_CHANGED")
         preparedNextTrack = candidate
+        preparedNextAnnouncement = NextTrackAnnouncementPreparation.prepare(candidate, effectiveSettings())
         TrackTalkDebugLog.event(
             "NEXT_TRACK_PREPARED",
             "source" to candidate.sourcePackageName,
@@ -1778,6 +2000,7 @@ class TrackVoiceController(
             "trackNumber" to candidate.trackNumber,
             "quality" to candidate.quality,
             "available" to candidate.availableFields.joinToString(","),
+            "announcementTextPrepared" to (preparedNextAnnouncement != null),
             "preparedAt" to candidate.preparedAt,
         )
         if (effectiveSettings().defaultReadFields.contains(AnnouncementReadField.TRACK_NUMBER) &&
@@ -1968,6 +2191,9 @@ class TrackVoiceController(
                 prepared
             }
         }
+        preparedNextTrack?.let { prepared ->
+            preparedNextAnnouncement = NextTrackAnnouncementPreparation.prepare(prepared, effectiveSettings())
+        }
 
         val current = _mediaState.value.currentEvent
         if (current != null && currentMetadataQuery(current).cacheKey() == cacheKey) {
@@ -2018,6 +2244,7 @@ class TrackVoiceController(
     private fun invalidatePreparedNextTrack(reason: String) {
         val previous = preparedNextTrack ?: return
         preparedNextTrack = null
+        preparedNextAnnouncement = null
         TrackTalkDebugLog.event(
             "NEXT_TRACK_INVALIDATED",
             "reason" to reason,
@@ -2052,7 +2279,16 @@ class TrackVoiceController(
         finishAnnouncementAudio()
     }
 
-    private fun finishAnnouncementAudio() {
+    private fun finishAnnouncementAudio(
+        transitionAtElapsedNanos: Long? = activeSpeechTransitionAtElapsedNanos,
+    ) {
+        val restoreRequestedAtNanos = SystemClock.elapsedRealtimeNanos()
+        TrackTalkDebugLog.event(
+            "TRANSITION_TIMING",
+            "stage" to "T8_PLAYBACK_RESTORE_REQUESTED",
+            "elapsedRealtimeNanos" to restoreRequestedAtNanos,
+            "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(restoreRequestedAtNanos),
+        )
         TrackTalkDebugLog.event("playback_restore")
         audioFocusManager.abandon()
         resumePausedPlayback()
@@ -2061,6 +2297,18 @@ class TrackVoiceController(
     private data class PreparedAnnouncement(
         val fingerprint: String,
         val token: Long,
+    )
+
+    private data class TransitionObservation(
+        val transitionAtMs: Long,
+        val transitionAtElapsedNanos: Long,
+        val identityResolvedAtElapsedNanos: Long,
+        val eventSequenceNumber: Long,
+        val eventType: MediaEventType,
+        val sessionKey: String?,
+        val previousEvent: PlaybackEvent,
+        val currentEvent: PlaybackEvent,
+        val matchedPrefetch: PreparedNextTrack?,
     )
 
     private companion object {

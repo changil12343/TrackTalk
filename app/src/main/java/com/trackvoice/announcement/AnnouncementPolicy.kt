@@ -57,6 +57,7 @@ object AnnouncementPolicy {
         effectiveEnabled: Boolean = userSettings.enabled,
         externalAudioOutput: Boolean = true,
         collectionOverride: PlaybackCollection? = null,
+        preparedText: String? = null,
     ): AnnouncementDecision {
         val detectedCollection = collectionOverride ?: PlaybackCollectionResolver.resolve(event)
         val collection = PlaybackCollectionResolver.applyFallback(
@@ -98,13 +99,15 @@ object AnnouncementPolicy {
             announcementOrder = AnnouncementOrder.DEFAULT,
         )
 
-        val text = AnnouncementFormatter.format(
-            event = event,
-            mode = mode,
-            options = formatOptions,
-            collection = collection,
-            voiceLanguage = userSettings.voiceLanguage,
-        )
+        val text = PreparedAnnouncementTextResolver.resolve(preparedText) {
+            AnnouncementFormatter.format(
+                event = event,
+                mode = mode,
+                options = formatOptions,
+                collection = collection,
+                voiceLanguage = userSettings.voiceLanguage,
+            )
+        }
         return if (text == null) {
             skipped(mode, delayMs, AnnouncementSkipReason.NO_TEXT)
         } else {
