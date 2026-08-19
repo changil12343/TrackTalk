@@ -16,14 +16,15 @@ import java.util.Locale
  * Pure work prepared while the preceding track is still playing. It never
  * represents current playback and cannot authorize pause, focus, or speech.
  */
-data class PreparedNextAnnouncement(
+internal data class PreparedNextAnnouncement(
     val candidate: PreparedNextTrack,
     val settingsSignature: String,
     val spokenMetadataSignature: String,
     val text: String,
+    val voicePlan: PreparedTtsVoicePlan? = null,
 )
 
-object NextTrackAnnouncementPreparation {
+internal object NextTrackAnnouncementPreparation {
     fun prepare(
         candidate: PreparedNextTrack,
         settings: UserSettings,

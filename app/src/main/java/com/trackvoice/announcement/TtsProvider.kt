@@ -56,6 +56,7 @@ interface TtsProvider {
 class AndroidSystemTtsProvider(context: Context) : TtsProvider {
     private val appContext = context.applicationContext
     private var engine: TextToSpeech? = null
+    private var platformVoicesByName: Map<String, android.speech.tts.Voice> = emptyMap()
 
     override val providerId: String = PROVIDER_ID
 
@@ -80,11 +81,8 @@ class AndroidSystemTtsProvider(context: Context) : TtsProvider {
 
     override fun availableVoices(): List<VoiceDescriptor> {
         val installedVoices: List<android.speech.tts.Voice> = engine?.voices?.toList().orEmpty()
+        platformVoicesByName = installedVoices.associateBy { it.name }
         return installedVoices
-            .sortedWith(
-                compareBy<android.speech.tts.Voice> { it.locale.toLanguageTag() }
-                    .thenBy { it.name },
-            )
             .map { voice ->
                 val localeTag = voice.locale.toLanguageTag()
                 VoiceDescriptor(
@@ -101,14 +99,13 @@ class AndroidSystemTtsProvider(context: Context) : TtsProvider {
                     features = voice.features,
                 )
             }
-            .let(VoiceMetadataPolicy::sort)
     }
 
     override fun setLanguage(locale: Locale): Int =
         engine?.setLanguage(locale) ?: TextToSpeech.LANG_NOT_SUPPORTED
 
     override fun setVoice(voiceId: String): Int =
-        engine?.voices?.firstOrNull { it.name == voiceId }?.let { engine?.setVoice(it) }
+        platformVoicesByName[voiceId]?.let { engine?.setVoice(it) }
             ?: TextToSpeech.ERROR
 
     override fun setSpeechRate(rate: Float): Int =
@@ -127,6 +124,7 @@ class AndroidSystemTtsProvider(context: Context) : TtsProvider {
     override fun shutdown() {
         runCatching { engine?.shutdown() }
         engine = null
+        platformVoicesByName = emptyMap()
     }
 
     companion object {

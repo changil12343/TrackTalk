@@ -14,6 +14,7 @@ import com.trackvoice.announcement.AnnouncementPlaybackPlanner
 import com.trackvoice.announcement.AnnouncementAudioTiming
 import com.trackvoice.announcement.NextTrackAnnouncementPreparation
 import com.trackvoice.announcement.PreparedNextAnnouncement
+import com.trackvoice.announcement.PreparedTtsVoicePlan
 import com.trackvoice.announcement.ConnectedAudioDevice
 import com.trackvoice.announcement.LegacyMusicVolumeRecovery
 import com.trackvoice.announcement.InstalledVoice
@@ -516,6 +517,7 @@ class TrackVoiceController(
         pendingToken: Long,
         transitionAtMs: Long? = null,
         transitionAtElapsedNanos: Long? = null,
+        preparedVoicePlan: PreparedTtsVoicePlan? = null,
     ) {
         if (!isPendingAnnouncement(pendingToken, fingerprint)) return
         if (preparedAnnouncement?.fingerprint != fingerprint || preparedAnnouncement?.token != pendingToken) return
@@ -524,11 +526,12 @@ class TrackVoiceController(
         activeSpeechTransitionAtElapsedNanos = transitionAtElapsedNanos
         val generation = ++speechGeneration
         val settings = effectiveSettings()
-        ttsEngine.speak(
+        ttsEngine.speakWithVoicePlan(
             text,
             settings,
             transitionAtMs = transitionAtMs,
             transitionAtElapsedNanos = transitionAtElapsedNanos,
+            preparedVoicePlan = preparedVoicePlan,
         ) { success, message ->
             if (generation == speechGeneration) {
                 activeSpeechTrack = null
@@ -709,6 +712,7 @@ class TrackVoiceController(
         val previousEvent = _mediaState.value.currentEvent
         var transitionObservation: TransitionObservation? = null
         var prefetchedAnnouncementText: String? = null
+        var prefetchedVoicePlan: PreparedTtsVoicePlan? = null
         val resumedAfterHardPlaybackBoundary = hardPlaybackBoundaryPending && (
             hardPlaybackBoundaryAllowsSameSession ||
                 hardPlaybackBoundarySessionKey == null ||
@@ -742,7 +746,7 @@ class TrackVoiceController(
                             actual = event ?: actualEvent,
                             sessionKey = incomingSessionKey,
                             settings = settings,
-                        )
+                        )?.also { prefetchedVoicePlan = preparedAnnouncement.voicePlan }
                     }
                 } else {
                     invalidatePreparedNextTrack("ACTUAL_TRACK_MISMATCH")
@@ -1000,6 +1004,7 @@ class TrackVoiceController(
             eventSequenceNumber = update.eventSequenceNumber,
             logicalSessionGeneration = logicalSessionGeneration,
             preparedText = prefetchedAnnouncementText,
+            preparedVoicePlan = prefetchedVoicePlan,
         )
         // Debug diagnostics are intentionally emitted after the immediate
         // pause request. Their timestamps still describe T0/T1 precisely, but
@@ -1148,6 +1153,7 @@ class TrackVoiceController(
         routeRetryAttempt: Int = 0,
         routeResolutionOverride: AudioRouteResolution? = null,
         preparedText: String? = null,
+        preparedVoicePlan: PreparedTtsVoicePlan? = null,
     ) {
         val settings = effectiveSettings()
         val app = appSettingsFor(event)
@@ -1524,6 +1530,7 @@ class TrackVoiceController(
                     pendingToken,
                     transitionAtMs,
                     transitionAtElapsedNanos,
+                    preparedVoicePlan,
                 )
                 if (transitionAtMs != null) lastActualTrackChangeAtMs = null
                 if (transitionAtElapsedNanos != null) {
@@ -1979,13 +1986,13 @@ class TrackVoiceController(
             return
         }
         if (previous != null && NextTrackPrefetch.samePrediction(previous, candidate)) {
-            preparedNextAnnouncement = NextTrackAnnouncementPreparation.prepare(candidate, effectiveSettings())
+            preparedNextAnnouncement = prepareNextAnnouncement(candidate, effectiveSettings())
             return
         }
 
         if (previous != null) invalidatePreparedNextTrack("QUEUE_OR_NEXT_ITEM_CHANGED")
         preparedNextTrack = candidate
-        preparedNextAnnouncement = NextTrackAnnouncementPreparation.prepare(candidate, effectiveSettings())
+        preparedNextAnnouncement = prepareNextAnnouncement(candidate, effectiveSettings())
         TrackTalkDebugLog.event(
             "NEXT_TRACK_PREPARED",
             "source" to candidate.sourcePackageName,
@@ -2001,6 +2008,7 @@ class TrackVoiceController(
             "quality" to candidate.quality,
             "available" to candidate.availableFields.joinToString(","),
             "announcementTextPrepared" to (preparedNextAnnouncement != null),
+            "voiceResolutionPrepared" to (preparedNextAnnouncement?.voicePlan != null),
             "preparedAt" to candidate.preparedAt,
         )
         if (effectiveSettings().defaultReadFields.contains(AnnouncementReadField.TRACK_NUMBER) &&
@@ -2192,7 +2200,7 @@ class TrackVoiceController(
             }
         }
         preparedNextTrack?.let { prepared ->
-            preparedNextAnnouncement = NextTrackAnnouncementPreparation.prepare(prepared, effectiveSettings())
+            preparedNextAnnouncement = prepareNextAnnouncement(prepared, effectiveSettings())
         }
 
         val current = _mediaState.value.currentEvent
@@ -2239,6 +2247,14 @@ class TrackVoiceController(
             trackNumberReliable = true,
             trackNumberSource = if (keepReliablePlayerNumber) trackNumberSource else TrackNumberSource.EXTERNAL_CATALOG,
         )
+    }
+
+    private fun prepareNextAnnouncement(
+        candidate: PreparedNextTrack,
+        settings: UserSettings,
+    ): PreparedNextAnnouncement? {
+        val prepared = NextTrackAnnouncementPreparation.prepare(candidate, settings) ?: return null
+        return prepared.copy(voicePlan = ttsEngine.prepareVoicePlan(prepared.text, settings))
     }
 
     private fun invalidatePreparedNextTrack(reason: String) {

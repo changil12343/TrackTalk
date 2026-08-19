@@ -31,6 +31,28 @@ data class TtsState(
     val fallbackUsed: Boolean = false,
 )
 
+internal enum class TtsWarmPathStage {
+    READY_TO_SPEAK,
+    VOICE_RESOLUTION_STARTED,
+    VOICE_RESOLUTION_COMPLETED,
+    CONFIGURATION_STARTED,
+    SPEAK_CALLED,
+    TTS_STARTED,
+    TTS_COMPLETED,
+}
+
+internal data class TtsWarmPathEvent(
+    val requestId: String,
+    val utteranceId: String? = null,
+    val segmentIndex: Int? = null,
+    val stage: TtsWarmPathStage,
+    val elapsedRealtimeNanos: Long,
+)
+
+internal fun interface TtsWarmPathObserver {
+    fun onEvent(event: TtsWarmPathEvent)
+}
+
 object TtsLocaleResolver {
     fun choose(requested: Locale, supported: Set<Locale>, systemDefault: Locale): Pair<Locale, Boolean> {
         val exact = supported.firstOrNull { it == requested }
@@ -89,12 +111,27 @@ object MixedLanguageSegmenter {
     }
 }
 
-class TtsEngine(context: Context) {
+class TtsEngine internal constructor(
+    context: Context,
+    private val ttsProvider: TtsProvider,
+    private val warmPathObserver: TtsWarmPathObserver?,
+) {
+    constructor(context: Context) : this(
+        context = context,
+        ttsProvider = AndroidSystemTtsProvider(context.applicationContext),
+        warmPathObserver = null,
+    )
+
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
     private val _state = MutableStateFlow(TtsState())
     private val _voices = MutableStateFlow<List<InstalledVoice>>(emptyList())
-    private val ttsProvider: TtsProvider = AndroidSystemTtsProvider(appContext)
+    private val voiceCatalog = TtsVoiceCatalog(ttsProvider)
+    private val voiceResolver = TtsVoiceResolver()
+    private var configuredVoiceName: String? = null
+    private var configuredLanguageTag: String? = null
+    private var configuredSpeechRate: Float? = null
+    private var configuredPitch: Float? = null
 
     val state: StateFlow<TtsState> = _state.asStateFlow()
     val voices: StateFlow<List<InstalledVoice>> = _voices.asStateFlow()
@@ -134,15 +171,35 @@ class TtsEngine(context: Context) {
         transitionAtElapsedNanos: Long? = null,
         voiceNameOverride: String? = null,
         onFinished: (success: Boolean, message: DiagnosticMessage) -> Unit,
+    ) = speakWithVoicePlan(
+        text = text,
+        settings = settings,
+        transitionAtMs = transitionAtMs,
+        transitionAtElapsedNanos = transitionAtElapsedNanos,
+        voiceNameOverride = voiceNameOverride,
+        preparedVoicePlan = null,
+        onFinished = onFinished,
+    )
+
+    internal fun speakWithVoicePlan(
+        text: String,
+        settings: UserSettings,
+        transitionAtMs: Long? = null,
+        transitionAtElapsedNanos: Long? = null,
+        voiceNameOverride: String? = null,
+        preparedVoicePlan: PreparedTtsVoicePlan?,
+        onFinished: (success: Boolean, message: DiagnosticMessage) -> Unit,
     ) {
-        mainHandler.post {
+        val requestId = warmPathObserver?.let { "trackvoice-request-${System.nanoTime()}" }
+        reportWarmPath(requestId, TtsWarmPathStage.READY_TO_SPEAK)
+        mainHandler.post speakTask@{
             if (text.isBlank()) {
                 onFinished(false, DiagnosticMessage.TTS_NOTHING_TO_READ)
-                return@post
+                return@speakTask
             }
             if (_state.value.status != TtsStatus.READY) {
                 onFinished(false, DiagnosticMessage.TTS_NOT_READY)
-                return@post
+                return@speakTask
             }
 
             // QUEUE_FLUSH stops the old audio, but old progress callbacks can still
@@ -157,11 +214,14 @@ class TtsEngine(context: Context) {
             pendingResults.clear()
             utteranceTransitionAtMs.clear()
             utteranceTransitionAtElapsedNanos.clear()
+            utteranceRequestIds.clear()
+            utteranceSegmentIndexes.clear()
             runCatching { ttsProvider.stop() }
-            val supportedLocales = runCatching { ttsProvider.supportedLocales() }
-                .getOrDefault(emptySet())
-            runCatching { ttsProvider.setSpeechRate(settings.speechRate.coerceIn(0.5f, 2f)) }
-            runCatching { ttsProvider.setPitch(settings.pitch.coerceIn(0.5f, 2f)) }
+            reportWarmPath(requestId, TtsWarmPathStage.CONFIGURATION_STARTED)
+            val catalogSnapshot = voiceCatalog.snapshot
+            val supportedLocales = catalogSnapshot.supportedLocales
+            configureSpeechRate(settings.speechRate.coerceIn(0.5f, 2f))
+            configurePitch(settings.pitch.coerceIn(0.5f, 2f))
             val ttsParamVolume = TtsVolumeMapping.parameterForUiVolume(settings.volume)
             val params = Bundle().apply {
                 putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, ttsParamVolume)
@@ -186,18 +246,46 @@ class TtsEngine(context: Context) {
                     supported = supportedLocales,
                     systemDefault = fallbackLocale,
                 )
-                val languageResult = runCatching { ttsProvider.setLanguage(resolvedLocale) }
-                    .getOrDefault(TextToSpeech.LANG_NOT_SUPPORTED)
-                val segmentFallback = localeFallback || languageResult == TextToSpeech.LANG_MISSING_DATA ||
-                    languageResult == TextToSpeech.LANG_NOT_SUPPORTED
+                reportWarmPath(
+                    requestId = requestId,
+                    stage = TtsWarmPathStage.VOICE_RESOLUTION_STARTED,
+                    segmentIndex = index,
+                )
+                val voiceConfiguration = runCatching {
+                    configureVoice(
+                        locale = resolvedLocale,
+                        settings = settings,
+                        voiceNameOverride = voiceNameOverride,
+                        preparedVoicePlan = preparedVoicePlan,
+                    )
+                }.getOrElse {
+                    VoiceConfiguration(
+                        usedGenderFallback = true,
+                        languageResult = configureLanguage(resolvedLocale),
+                    )
+                }
+                val segmentFallback = localeFallback ||
+                    voiceConfiguration.languageResult == TextToSpeech.LANG_MISSING_DATA ||
+                    voiceConfiguration.languageResult == TextToSpeech.LANG_NOT_SUPPORTED
                 localeFallbackUsed = localeFallbackUsed || segmentFallback
-                genderFallbackUsed = genderFallbackUsed || runCatching {
-                    selectVoice(ttsProvider, resolvedLocale, settings, voiceNameOverride)
-                }.getOrDefault(true)
+                genderFallbackUsed = genderFallbackUsed || voiceConfiguration.usedGenderFallback
+                reportWarmPath(
+                    requestId = requestId,
+                    stage = TtsWarmPathStage.VOICE_RESOLUTION_COMPLETED,
+                    segmentIndex = index,
+                )
                 val utteranceId = "trackvoice-${System.nanoTime()}-$index"
                 pendingResults[utteranceId] = batch
                 utteranceTransitionAtMs[utteranceId] = transitionAtMs
                 utteranceTransitionAtElapsedNanos[utteranceId] = transitionAtElapsedNanos
+                if (requestId != null) utteranceRequestIds[utteranceId] = requestId
+                utteranceSegmentIndexes[utteranceId] = index
+                reportWarmPath(
+                    requestId = requestId,
+                    stage = TtsWarmPathStage.SPEAK_CALLED,
+                    utteranceId = utteranceId,
+                    segmentIndex = index,
+                )
                 val result = runCatching { ttsProvider.speak(
                     segment.text,
                     if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
@@ -206,7 +294,7 @@ class TtsEngine(context: Context) {
                 ) }.getOrDefault(TextToSpeech.ERROR)
                 if (result == TextToSpeech.ERROR) {
                     failBatch(batch, DiagnosticMessage.TTS_SYNTHESIS_FAILED)
-                    return@post
+                    return@speakTask
                 }
             }
             _state.value = TtsState(
@@ -296,9 +384,18 @@ class TtsEngine(context: Context) {
         mainHandler.post {
             runCatching { ttsProvider.stop() }
             runCatching { ttsProvider.shutdown() }
+            voiceCatalog.clear()
+            voiceResolver.clear()
+            configuredVoiceName = null
+            configuredLanguageTag = null
+            configuredSpeechRate = null
+            configuredPitch = null
+            _voices.value = emptyList()
             pendingResults.clear()
             utteranceTransitionAtMs.clear()
             utteranceTransitionAtElapsedNanos.clear()
+            utteranceRequestIds.clear()
+            utteranceSegmentIndexes.clear()
             _state.value = TtsState(TtsStatus.CLOSED, DiagnosticMessage.TTS_CLOSED)
         }
     }
@@ -312,10 +409,23 @@ class TtsEngine(context: Context) {
     private val pendingResults = mutableMapOf<String, PendingBatch>()
     private val utteranceTransitionAtMs = mutableMapOf<String, Long?>()
     private val utteranceTransitionAtElapsedNanos = mutableMapOf<String, Long?>()
+    private val utteranceRequestIds = mutableMapOf<String, String>()
+    private val utteranceSegmentIndexes = mutableMapOf<String, Int>()
 
     private val progressListener = object : UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) {
             val startedAtNanos = SystemClock.elapsedRealtimeNanos()
+            utteranceId?.let { id ->
+                utteranceRequestIds[id]?.let { requestId ->
+                    reportWarmPath(
+                        requestId = requestId,
+                        stage = TtsWarmPathStage.TTS_STARTED,
+                        utteranceId = id,
+                        segmentIndex = utteranceSegmentIndexes[id],
+                        elapsedRealtimeNanos = startedAtNanos,
+                    )
+                }
+            }
             TrackTalkDebugLog.event("tts_start", "utteranceId" to utteranceId)
             TrackTalkDebugLog.event(
                 "TTS_STARTED",
@@ -334,11 +444,23 @@ class TtsEngine(context: Context) {
 
         override fun onDone(utteranceId: String?) {
             if (utteranceId == null) return
+            val completedAtNanos = SystemClock.elapsedRealtimeNanos()
+            utteranceRequestIds[utteranceId]?.let { requestId ->
+                reportWarmPath(
+                    requestId = requestId,
+                    stage = TtsWarmPathStage.TTS_COMPLETED,
+                    utteranceId = utteranceId,
+                    segmentIndex = utteranceSegmentIndexes[utteranceId],
+                    elapsedRealtimeNanos = completedAtNanos,
+                )
+            }
             TrackTalkDebugLog.event("tts_segment_done", "utteranceId" to utteranceId)
-            mainHandler.post {
-                val batch = pendingResults.remove(utteranceId) ?: return@post
+            mainHandler.post progressTask@{
+                val batch = pendingResults.remove(utteranceId) ?: return@progressTask
                 utteranceTransitionAtMs.remove(utteranceId)
                 utteranceTransitionAtElapsedNanos.remove(utteranceId)
+                utteranceRequestIds.remove(utteranceId)
+                utteranceSegmentIndexes.remove(utteranceId)
                 batch.remaining -= 1
                 if (batch.remaining == 0 && !batch.completed) {
                     batch.completed = true
@@ -358,6 +480,8 @@ class TtsEngine(context: Context) {
             mainHandler.post {
                 utteranceTransitionAtMs.remove(utteranceId)
                 utteranceTransitionAtElapsedNanos.remove(utteranceId)
+                utteranceRequestIds.remove(utteranceId)
+                utteranceSegmentIndexes.remove(utteranceId)
                 pendingResults[utteranceId]?.let { failBatch(it, DiagnosticMessage.TTS_PLAYBACK_ERROR) }
             }
         }
@@ -368,6 +492,8 @@ class TtsEngine(context: Context) {
             mainHandler.post {
                 utteranceTransitionAtMs.remove(utteranceId)
                 utteranceTransitionAtElapsedNanos.remove(utteranceId)
+                utteranceRequestIds.remove(utteranceId)
+                utteranceSegmentIndexes.remove(utteranceId)
                 pendingResults[utteranceId]?.let { failBatch(it, DiagnosticMessage.TTS_PLAYBACK_ERROR) }
             }
         }
@@ -378,42 +504,175 @@ class TtsEngine(context: Context) {
         batch.completed = true
         pendingResults.filterValues { it === batch }.keys.forEach(utteranceTransitionAtMs::remove)
         pendingResults.filterValues { it === batch }.keys.forEach(utteranceTransitionAtElapsedNanos::remove)
+        pendingResults.filterValues { it === batch }.keys.forEach(utteranceRequestIds::remove)
+        pendingResults.filterValues { it === batch }.keys.forEach(utteranceSegmentIndexes::remove)
         pendingResults.entries.removeAll { it.value === batch }
         runCatching { ttsProvider.stop() }
         runCatching { batch.callback(false, message) }
     }
 
-    private fun selectVoice(
-        provider: TtsProvider,
+    private data class VoiceConfiguration(
+        val usedGenderFallback: Boolean,
+        val languageResult: Int,
+    )
+
+    private fun configureVoice(
         locale: Locale,
         settings: UserSettings,
         voiceNameOverride: String? = null,
-    ): Boolean {
-        val compatibleVoices = provider.availableVoices().filter {
-            Locale.forLanguageTag(it.localeTag).language == locale.language
-        }
-        val candidates = compatibleVoices.map { voice ->
-            VoiceCandidate(
-                name = voice.name,
-                gender = voice.gender,
-                quality = voice.quality,
-                requiresNetwork = voice.requiresNetwork,
-                latency = voice.latency,
-            )
-        }
-        val selection = VoiceSelectionPolicy.choose(
-            candidates = candidates,
-            explicitName = voiceNameOverride ?: settings.voiceName.takeIf { settings.voiceLanguage != VoiceLanguage.AUTO },
-            requestedGender = if (voiceNameOverride != null) GenderFilter.ANY else settings.genderFilter,
+        preparedVoicePlan: PreparedTtsVoicePlan? = null,
+    ): VoiceConfiguration {
+        val explicitVoiceName = voiceNameOverride
+            ?: settings.voiceName.takeIf { settings.voiceLanguage != VoiceLanguage.AUTO }
+        val requestedGender = if (voiceNameOverride != null) GenderFilter.ANY else settings.genderFilter
+        val initialSnapshot = voiceCatalog.snapshot
+        val resolutionKey = voiceResolver.keyFor(
+            snapshot = initialSnapshot,
+            locale = locale,
+            requestedGender = requestedGender,
+            explicitVoiceName = explicitVoiceName,
         )
-        selection.name
-            ?.let { name -> compatibleVoices.firstOrNull { it.name == name } }
-            ?.let { provider.setVoice(it.name) }
-        return selection.usedGenderFallback
+        var decision = preparedVoicePlan?.decisionFor(resolutionKey)
+            ?: voiceResolver.resolve(
+                snapshot = initialSnapshot,
+                locale = locale,
+                requestedGender = requestedGender,
+                explicitVoiceName = explicitVoiceName,
+            )
+        decision.voiceName?.let { desiredVoice ->
+            if (configuredVoiceName == desiredVoice) {
+                return VoiceConfiguration(decision.usedGenderFallback, TextToSpeech.LANG_AVAILABLE)
+            }
+            val initialResult = runCatching { ttsProvider.setVoice(desiredVoice) }
+                .getOrDefault(TextToSpeech.ERROR)
+            if (initialResult != TextToSpeech.ERROR) {
+                configuredVoiceName = desiredVoice
+                configuredLanguageTag = locale.toLanguageTag()
+                return VoiceConfiguration(decision.usedGenderFallback, TextToSpeech.LANG_AVAILABLE)
+            }
+
+            // A cached platform Voice can disappear after an engine/package
+            // update. Refresh once, evict the stale decision and retry a
+            // compatible voice before falling back to setLanguage().
+            voiceResolver.invalidateVoice(desiredVoice)
+            refreshVoices()
+            decision = voiceResolver.resolve(
+                snapshot = voiceCatalog.snapshot,
+                locale = locale,
+                requestedGender = requestedGender,
+                explicitVoiceName = explicitVoiceName,
+            )
+            decision.voiceName?.let { refreshedVoice ->
+                val retryResult = runCatching { ttsProvider.setVoice(refreshedVoice) }
+                    .getOrDefault(TextToSpeech.ERROR)
+                if (retryResult != TextToSpeech.ERROR) {
+                    configuredVoiceName = refreshedVoice
+                    configuredLanguageTag = locale.toLanguageTag()
+                    return VoiceConfiguration(decision.usedGenderFallback, TextToSpeech.LANG_AVAILABLE)
+                }
+                voiceResolver.invalidateVoice(refreshedVoice)
+            }
+        }
+
+        return VoiceConfiguration(
+            usedGenderFallback = decision.usedGenderFallback,
+            languageResult = configureLanguage(locale),
+        )
+    }
+
+    private fun configureLanguage(locale: Locale): Int {
+        val languageTag = locale.toLanguageTag()
+        if (configuredVoiceName == null && configuredLanguageTag == languageTag) {
+            return TextToSpeech.LANG_AVAILABLE
+        }
+        return runCatching { ttsProvider.setLanguage(locale) }
+            .getOrDefault(TextToSpeech.LANG_NOT_SUPPORTED)
+            .also { result ->
+                if (result != TextToSpeech.LANG_MISSING_DATA && result != TextToSpeech.LANG_NOT_SUPPORTED) {
+                    configuredVoiceName = null
+                    configuredLanguageTag = languageTag
+                }
+            }
+    }
+
+    private fun configureSpeechRate(rate: Float) {
+        if (configuredSpeechRate == rate) return
+        val result = runCatching { ttsProvider.setSpeechRate(rate) }.getOrDefault(TextToSpeech.ERROR)
+        if (result != TextToSpeech.ERROR) configuredSpeechRate = rate
+    }
+
+    private fun configurePitch(pitch: Float) {
+        if (configuredPitch == pitch) return
+        val result = runCatching { ttsProvider.setPitch(pitch) }.getOrDefault(TextToSpeech.ERROR)
+        if (result != TextToSpeech.ERROR) configuredPitch = pitch
     }
 
     private fun refreshVoices() {
-        _voices.value = ttsProvider.availableVoices()
+        val snapshot = voiceCatalog.refresh()
+        voiceResolver.clear()
+        configuredVoiceName = null
+        configuredLanguageTag = null
+        _voices.value = snapshot.voices
+    }
+
+    /**
+     * Resolves desired voice identities while the preceding track is playing.
+     * This only primes/reads the resolution cache; it never calls setVoice(),
+     * setLanguage(), speak(), or any playback/audio API.
+     */
+    internal fun prepareVoicePlan(text: String, settings: UserSettings): PreparedTtsVoicePlan? {
+        if (_state.value.status != TtsStatus.READY || text.isBlank()) return null
+        val snapshot = voiceCatalog.snapshot
+        if (snapshot.voices.isEmpty()) return null
+        val fallbackLocale = settings.voiceLanguage.toLocale(text)
+        val explicitVoiceName = settings.voiceName.takeIf { settings.voiceLanguage != VoiceLanguage.AUTO }
+        val decisions = MixedLanguageSegmenter.segment(text, fallbackLocale)
+            .map { segment ->
+                val (locale, _) = TtsLocaleResolver.choose(
+                    requested = segment.locale,
+                    supported = snapshot.supportedLocales,
+                    systemDefault = fallbackLocale,
+                )
+                val key = voiceResolver.keyFor(
+                    snapshot = snapshot,
+                    locale = locale,
+                    requestedGender = settings.genderFilter,
+                    explicitVoiceName = explicitVoiceName,
+                )
+                PreparedTtsVoiceDecision(
+                    key = key,
+                    decision = voiceResolver.resolve(
+                        snapshot = snapshot,
+                        locale = locale,
+                        requestedGender = settings.genderFilter,
+                        explicitVoiceName = explicitVoiceName,
+                    ),
+                )
+            }
+            .distinctBy { it.key }
+        return if (decisions.isEmpty()) null else PreparedTtsVoicePlan(decisions)
+    }
+
+    private fun reportWarmPath(
+        requestId: String?,
+        stage: TtsWarmPathStage,
+        utteranceId: String? = null,
+        segmentIndex: Int? = null,
+        elapsedRealtimeNanos: Long? = null,
+    ) {
+        val observer = warmPathObserver ?: return
+        val activeRequestId = requestId ?: return
+        runCatching {
+            observer.onEvent(
+                TtsWarmPathEvent(
+                    requestId = activeRequestId,
+                    utteranceId = utteranceId,
+                    segmentIndex = segmentIndex,
+                    stage = stage,
+                    elapsedRealtimeNanos = elapsedRealtimeNanos ?: SystemClock.elapsedRealtimeNanos(),
+                ),
+            )
+        }
     }
 
     private fun VoiceLanguage.toLocale(text: String): Locale = when (this) {
