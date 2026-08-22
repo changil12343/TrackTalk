@@ -15,6 +15,10 @@ import com.trackvoice.announcement.AnnouncementAudioTiming
 import com.trackvoice.announcement.NextTrackAnnouncementPreparation
 import com.trackvoice.announcement.PreparedNextAnnouncement
 import com.trackvoice.announcement.PreparedTtsVoicePlan
+import com.trackvoice.announcement.PlaybackRestoreObligation
+import com.trackvoice.announcement.PlaybackRestoreCycleState
+import com.trackvoice.announcement.PlaybackRestoreTrigger
+import com.trackvoice.announcement.PlaybackRestoreWatchdogPolicy
 import com.trackvoice.announcement.ConnectedAudioDevice
 import com.trackvoice.announcement.LegacyMusicVolumeRecovery
 import com.trackvoice.announcement.InstalledVoice
@@ -42,7 +46,8 @@ import android.os.SystemClock
 import com.trackvoice.media.MediaEventType
 import com.trackvoice.media.MediaMonitorUpdate
 import com.trackvoice.media.MediaSessionMonitor
-import com.trackvoice.media.PlaybackPauseToken
+import com.trackvoice.media.PlaybackRestoreEvent
+import com.trackvoice.media.PlaybackRestoreEventType
 import com.trackvoice.media.PlaybackEvent
 import com.trackvoice.media.PlaybackStatus
 import com.trackvoice.media.TrackFingerprint
@@ -205,7 +210,8 @@ class TrackVoiceController(
     private var preparedNextTrack: PreparedNextTrack? = null
     private var preparedNextAnnouncement: PreparedNextAnnouncement? = null
     private var monitor: MediaSessionMonitor? = null
-    private var pausedPlayback: PlaybackPauseToken? = null
+    private val playbackRestoreObligation = PlaybackRestoreObligation()
+    private var playbackRestoreWatchdogJob: Job? = null
     private var activeSpeechTrack: PlaybackEvent? = null
     private var lastAnnouncedTrack: PlaybackEvent? = null
     private var lastAnnouncedAt: Long = Long.MIN_VALUE
@@ -353,7 +359,7 @@ class TrackVoiceController(
         speechGeneration += 1
         activeSpeechTrack = null
         cancelPendingAnnouncement()
-        finishAnnouncementAudio()
+        finishAnnouncementAudio(trigger = PlaybackRestoreTrigger.CONTROLLER_DETACH)
         monitorGeneration += 1
         monitorStartJob?.cancel()
         monitorStartJob = null
@@ -424,7 +430,12 @@ class TrackVoiceController(
 
     fun refreshSupportedMediaApps() = discoverSupportedMediaApps()
 
-    fun togglePlayback(): Boolean? = monitor?.toggleSelectedPlayback()
+    fun togglePlayback(): Boolean? {
+        // A UI/tile playback command is explicit user intent. It must own the
+        // next state instead of a delayed automatic restore from old speech.
+        cancelPlaybackRestoreWithoutResume("USER_TOGGLE")
+        return monitor?.toggleSelectedPlayback()
+    }
 
     fun isPlaybackPlaying(): Boolean? = monitor?.isSelectedPlaybackPlaying()
 
@@ -473,23 +484,32 @@ class TrackVoiceController(
         if (!plan.pauseBeforeAnnouncement) {
             // If a previous "announce then play" batch was interrupted, do not
             // carry its pause token into a new "play immediately" announcement.
-            resumePausedPlayback()
+            finishAnnouncementAudio(trigger = PlaybackRestoreTrigger.NON_PAUSE_MODE)
         }
         // A new batch owns the focus lifecycle. This also releases an old
         // focus request when TTS replaces speech with QUEUE_FLUSH.
         audioFocusManager.abandon()
-        if (pausedPlayback == null && plan.pauseBeforeAnnouncement) {
-            pausedPlayback = monitor?.pauseSelectedIfPlaying()
+        val cycleId = if (plan.pauseBeforeAnnouncement) {
+            armPlaybackRestore(
+                event = _mediaState.value.currentEvent,
+                sessionKey = selectedSessionKey,
+                transitionAtElapsedNanos = null,
+            )
+        } else {
+            null
         }
         // In pause-until-finished mode, a focus request can pause a media app
         // even when its session was too transient to return a resume token.
         // Do not make audio focus the only pause mechanism; without a token we
         // let TTS play over the current state and avoid leaving music stopped.
         val shouldRequestAudioFocus = plan.requestAudioFocus &&
-            (!plan.pauseBeforeAnnouncement || pausedPlayback != null)
+            (!plan.pauseBeforeAnnouncement || cycleId != null)
         if (shouldRequestAudioFocus && !audioFocusManager.request(plan.shouldDuckMusic)) {
             audioFocusManager.abandon()
-            resumePausedPlayback()
+            finishAnnouncementAudio(
+                trigger = PlaybackRestoreTrigger.AUDIO_FOCUS_FAILED,
+                cycleId = cycleId,
+            )
             _diagnostics.value = _diagnostics.value.copy(
                 lastAnnouncementAt = System.currentTimeMillis(),
                 lastAnnouncementSucceeded = false,
@@ -497,10 +517,27 @@ class TrackVoiceController(
             )
             return
         }
-        ttsEngine.speak(text, settings, voiceNameOverride = voiceNameOverride) { success, message ->
+        if (cycleId != null) {
+            playbackRestoreObligation.bindSpeech(cycleId, generation)
+            schedulePlaybackRestoreWatchdog(
+                cycleId = cycleId,
+                timeoutMs = PlaybackRestoreWatchdogPolicy.timeoutMs(text.length, settings.speechRate),
+            )
+            logRestoreCycle(cycleId, "TTS_REQUESTED", _mediaState.value.currentEvent)
+        }
+        ttsEngine.speak(
+            text = text,
+            settings = settings,
+            voiceNameOverride = voiceNameOverride,
+            announcementCycleId = cycleId,
+        ) { success, message ->
             if (generation == speechGeneration) {
                 if (shouldRequestAudioFocus) audioFocusManager.abandon()
-                resumePausedPlayback()
+                finishAnnouncementAudio(
+                    trigger = restoreTrigger(success, message),
+                    cycleId = cycleId,
+                    speechGeneration = generation,
+                )
                 _diagnostics.value = _diagnostics.value.copy(
                     lastAnnouncementAt = System.currentTimeMillis(),
                     lastAnnouncementSucceeded = success,
@@ -526,24 +563,41 @@ class TrackVoiceController(
         activeSpeechTransitionAtElapsedNanos = transitionAtElapsedNanos
         val generation = ++speechGeneration
         val settings = effectiveSettings()
+        val cycleId = playbackRestoreObligation.activeCycle()?.id
+        if (cycleId != null) {
+            playbackRestoreObligation.bindSpeech(cycleId, generation)
+            schedulePlaybackRestoreWatchdog(
+                cycleId = cycleId,
+                timeoutMs = PlaybackRestoreWatchdogPolicy.timeoutMs(text.length, settings.speechRate),
+            )
+            logRestoreCycle(cycleId, "TTS_REQUESTED", track)
+        }
         ttsEngine.speakWithVoicePlan(
             text,
             settings,
             transitionAtMs = transitionAtMs,
             transitionAtElapsedNanos = transitionAtElapsedNanos,
             preparedVoicePlan = preparedVoicePlan,
+            announcementCycleId = cycleId,
         ) { success, message ->
             if (generation == speechGeneration) {
                 activeSpeechTrack = null
                 val completedAtNanos = SystemClock.elapsedRealtimeNanos()
                 TrackTalkDebugLog.event(
                     "TRANSITION_TIMING",
-                    "stage" to "T7_TTS_COMPLETED",
+                    "stage" to if (success) "T7_TTS_COMPLETED" else "T7_TTS_TERMINATED",
+                    "announcementCycleId" to cycleId,
                     "elapsedRealtimeNanos" to completedAtNanos,
                     "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(completedAtNanos),
                     "mediaId" to track.mediaId,
+                    "result" to message,
                 )
-                finishAnnouncementAudio(transitionAtElapsedNanos)
+                finishAnnouncementAudio(
+                    transitionAtElapsedNanos = transitionAtElapsedNanos,
+                    trigger = restoreTrigger(success, message),
+                    cycleId = cycleId,
+                    speechGeneration = generation,
+                )
                 activeSpeechTransitionAtElapsedNanos = null
                 _diagnostics.value = _diagnostics.value.copy(
                     lastAnnouncementAt = System.currentTimeMillis(),
@@ -552,6 +606,15 @@ class TrackVoiceController(
                 )
             }
         }
+    }
+
+    private fun restoreTrigger(
+        success: Boolean,
+        message: DiagnosticMessage,
+    ): PlaybackRestoreTrigger = when {
+        success -> PlaybackRestoreTrigger.TTS_COMPLETED
+        message == DiagnosticMessage.TTS_INTERRUPTED -> PlaybackRestoreTrigger.TTS_INTERRUPTED
+        else -> PlaybackRestoreTrigger.TTS_ERROR
     }
 
     fun onScreenOff() {
@@ -588,7 +651,7 @@ class TrackVoiceController(
         duplicateSuppressor.clear()
         temporalContextResolver.reset()
         cancelPendingAnnouncement()
-        finishAnnouncementAudio()
+        finishAnnouncementAudio(trigger = PlaybackRestoreTrigger.CONTROLLER_CLOSE)
         monitorGeneration += 1
         monitorStartJob?.cancel()
         monitorStartJob = null
@@ -685,9 +748,205 @@ class TrackVoiceController(
         }
     }
 
-    private fun resumePausedPlayback() {
-        pausedPlayback?.let { monitor?.resumePlayback(it) }
-        pausedPlayback = null
+    private fun armPlaybackRestore(
+        event: PlaybackEvent?,
+        sessionKey: String?,
+        transitionAtElapsedNanos: Long?,
+    ): Long? {
+        playbackRestoreObligation.activeCycle()?.let { active ->
+            if (active.state != PlaybackRestoreCycleState.ARMED) {
+                logRestoreCycle(
+                    cycleId = active.id,
+                    stage = "PAUSE_NOT_REUSED",
+                    event = event,
+                    reason = "RESTORE_ALREADY_REQUESTED",
+                )
+                return null
+            }
+            if (event == null || playbackRestoreObligation.matchesActiveTrack(event)) return active.id
+            logRestoreCycle(
+                cycleId = active.id,
+                stage = "PAUSE_NOT_REUSED",
+                event = event,
+                reason = "DIFFERENT_LOGICAL_TRACK",
+            )
+            return null
+        }
+        val cycleId = playbackRestoreObligation.reserveCycleId()
+        val pauseToken = monitor?.pauseSelectedIfPlaying(
+            expectedEvent = event,
+            expectedSessionKey = sessionKey,
+        ) { pauseRequestedAtNanos ->
+            TrackTalkDebugLog.event(
+                "TRANSITION_TIMING",
+                "stage" to "T3_PAUSE_REQUESTED",
+                "announcementCycleId" to cycleId,
+                "elapsedRealtimeNanos" to pauseRequestedAtNanos,
+                "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(pauseRequestedAtNanos),
+                "mediaId" to event?.mediaId,
+            )
+            logRestoreCycle(
+                cycleId = cycleId,
+                stage = "PAUSE_REQUESTED",
+                event = event,
+                elapsedRealtimeNanos = pauseRequestedAtNanos,
+            )
+        } ?: return null
+        val armedAtNanos = SystemClock.elapsedRealtimeNanos()
+        playbackRestoreObligation.arm(
+            cycleId = cycleId,
+            pauseToken = pauseToken,
+            track = event,
+            sessionGeneration = logicalSessionGeneration,
+            armedAtElapsedNanos = armedAtNanos,
+            transitionAtElapsedNanos = transitionAtElapsedNanos,
+        )
+        logRestoreCycle(
+            cycleId = cycleId,
+            stage = "OWNERSHIP_ARMED",
+            event = event,
+            elapsedRealtimeNanos = armedAtNanos,
+            reason = "TRACKTALK_PAUSE_ISSUED",
+        )
+        schedulePlaybackRestoreWatchdog(
+            cycleId = cycleId,
+            timeoutMs = PlaybackRestoreWatchdogPolicy.MAX_TIMEOUT_MS,
+        )
+        return cycleId
+    }
+
+    private fun resumePausedPlayback(
+        trigger: PlaybackRestoreTrigger = PlaybackRestoreTrigger.ANNOUNCEMENT_CANCELLED,
+        cycleId: Long? = playbackRestoreObligation.activeCycle()?.id,
+        speechGeneration: Long? = null,
+    ) {
+        val id = cycleId ?: return
+        val cycle = playbackRestoreObligation.requestRestore(id, trigger, speechGeneration) ?: run {
+            logRestoreCycle(
+                cycleId = id,
+                stage = "RESTORE_REQUEST_IGNORED",
+                event = playbackRestoreObligation.activeCycle()?.track,
+                reason = "STALE_OR_ALREADY_REQUESTED_$trigger",
+            )
+            return
+        }
+        playbackRestoreWatchdogJob?.cancel()
+        playbackRestoreWatchdogJob = null
+        val requestedAtNanos = SystemClock.elapsedRealtimeNanos()
+        logRestoreCycle(
+            cycleId = cycle.id,
+            stage = "RESTORE_REQUESTED",
+            event = cycle.track,
+            elapsedRealtimeNanos = requestedAtNanos,
+            reason = trigger.name,
+        )
+        val currentMonitor = monitor
+        if (currentMonitor == null) {
+            completePlaybackRestore(cycle.id, "FAILED_NO_MONITOR")
+            return
+        }
+        currentMonitor.resumePlayback(
+            token = cycle.pauseToken,
+            announcementCycleId = cycle.id,
+            onEvent = ::handlePlaybackRestoreEvent,
+        )
+    }
+
+    private fun handlePlaybackRestoreEvent(event: PlaybackRestoreEvent) {
+        val cycleId = event.announcementCycleId ?: return
+        logRestoreCycle(
+            cycleId = cycleId,
+            stage = event.type.name,
+            event = playbackRestoreObligation.activeCycle()?.track,
+            elapsedRealtimeNanos = event.elapsedRealtimeNanos,
+            reason = "${event.reason};attempt=${event.attempt};session=${event.sessionKey}",
+        )
+        when (event.type) {
+            PlaybackRestoreEventType.PLAYING_CONFIRMED ->
+                completePlaybackRestore(cycleId, "PLAYING_CONFIRMED")
+
+            PlaybackRestoreEventType.CANCELLED ->
+                completePlaybackRestore(cycleId, "CANCELLED_${event.reason}")
+
+            PlaybackRestoreEventType.FAILED ->
+                completePlaybackRestore(cycleId, "FAILED_${event.reason}")
+
+            PlaybackRestoreEventType.PLAY_REQUESTED,
+            PlaybackRestoreEventType.PLAY_RETRY_REQUESTED,
+            PlaybackRestoreEventType.WAITING_FOR_SESSION,
+            -> Unit
+        }
+    }
+
+    private fun completePlaybackRestore(cycleId: Long, reason: String) {
+        val cycle = playbackRestoreObligation.complete(cycleId) ?: return
+        playbackRestoreWatchdogJob?.cancel()
+        playbackRestoreWatchdogJob = null
+        val terminalStage = when {
+            reason == "PLAYING_CONFIRMED" -> "RESTORE_COMPLETED"
+            reason.startsWith("CANCELLED_") -> "RESTORE_CANCELLED"
+            reason.startsWith("FAILED_") -> "RESTORE_FAILED"
+            else -> "RESTORE_FINALIZED"
+        }
+        logRestoreCycle(
+            cycleId = cycle.id,
+            stage = terminalStage,
+            event = cycle.track,
+            reason = reason,
+        )
+    }
+
+    private fun cancelPlaybackRestoreWithoutResume(reason: String) {
+        val cycle = playbackRestoreObligation.activeCycle() ?: return
+        playbackRestoreObligation.cancel(cycle.id)
+        playbackRestoreWatchdogJob?.cancel()
+        playbackRestoreWatchdogJob = null
+        monitor?.cancelPendingResume(reason)
+        logRestoreCycle(
+            cycleId = cycle.id,
+            stage = "RESTORE_CANCELLED",
+            event = cycle.track,
+            reason = reason,
+        )
+    }
+
+    private fun schedulePlaybackRestoreWatchdog(cycleId: Long, timeoutMs: Long) {
+        playbackRestoreWatchdogJob?.cancel()
+        playbackRestoreWatchdogJob = scope.launch {
+            delay(timeoutMs)
+            val cycle = playbackRestoreObligation.activeCycle()?.takeIf { it.id == cycleId } ?: return@launch
+            logRestoreCycle(
+                cycleId = cycle.id,
+                stage = "WATCHDOG_TIMEOUT",
+                event = cycle.track,
+                reason = "TTS_COMPLETION_NOT_RECEIVED_${timeoutMs}MS",
+            )
+            audioFocusManager.abandon()
+            resumePausedPlayback(
+                trigger = PlaybackRestoreTrigger.WATCHDOG_TIMEOUT,
+                cycleId = cycle.id,
+            )
+        }
+    }
+
+    private fun logRestoreCycle(
+        cycleId: Long,
+        stage: String,
+        event: PlaybackEvent?,
+        elapsedRealtimeNanos: Long = SystemClock.elapsedRealtimeNanos(),
+        reason: String? = null,
+    ) {
+        TrackTalkDebugLog.event(
+            "ANNOUNCEMENT_RESTORE_CYCLE",
+            "announcementCycleId" to cycleId,
+            "stage" to stage,
+            "elapsedRealtimeNanos" to elapsedRealtimeNanos,
+            "source" to event?.sourcePackageName,
+            "mediaId" to event?.mediaId,
+            "title" to event?.title,
+            "logicalSessionGeneration" to logicalSessionGeneration,
+            "reason" to reason,
+        )
     }
 
     private fun processMediaUpdate(update: MediaMonitorUpdate) {
@@ -726,6 +985,10 @@ class TrackVoiceController(
                 requireSameSource = true,
             )
         if (actualTrackChange) {
+            // A confirmed replacement track is newer user/provider intent.
+            // Never let an old announcement cycle issue PLAY for its stale
+            // TrackTalk-owned pause after this boundary.
+            cancelPlaybackRestoreWithoutResume("TRACK_CHANGED_DURING_ANNOUNCEMENT")
             val actualTrackChangeAtMs = System.currentTimeMillis()
             val actualTrackChangeAtElapsedNanos = update.observedAtElapsedNanos
                 .takeIf { it > 0L }
@@ -949,9 +1212,44 @@ class TrackVoiceController(
                 "mediaId" to event.mediaId,
             )
         }
+        playbackRestoreObligation.activeCycle()?.let { cycle ->
+            if (
+                event.isPlaying &&
+                playbackRestoreObligation.matchesActiveTrack(event) &&
+                playbackRestoreObligation.markPlayerPlayingAfterOwnedPause(
+                    cycle.id,
+                    SystemClock.elapsedRealtimeNanos(),
+                )
+            ) {
+                logRestoreCycle(
+                    cycleId = cycle.id,
+                    stage = "PLAYER_PLAYING_DURING_TTS",
+                    event = event,
+                    reason = "INTERVENING_PLAYBACK_INTENT",
+                )
+            }
+        }
         val newPlaybackOccurrence = actualTrackChange || resumedAfterHardPlaybackBoundary
         if (!event.isPlaying) {
             refreshPreparedNextTrack(event, incomingSessionKey)
+            val restoreCycle = playbackRestoreObligation.activeCycle()
+            if (
+                event.playbackState == PlaybackStatus.PAUSED &&
+                restoreCycle != null &&
+                playbackRestoreObligation.matchesActiveTrack(event)
+            ) {
+                val pausedObservedAtNanos = SystemClock.elapsedRealtimeNanos()
+                if (playbackRestoreObligation.hasInterveningPlaybackIntent(restoreCycle.id)) {
+                    cancelPlaybackRestoreWithoutResume("USER_PAUSED_AFTER_INTERVENING_PLAYBACK")
+                } else if (playbackRestoreObligation.markPlayerPaused(restoreCycle.id, pausedObservedAtNanos)) {
+                    logRestoreCycle(
+                        cycleId = restoreCycle.id,
+                        stage = "PLAYER_PAUSED_OBSERVED",
+                        event = event,
+                        elapsedRealtimeNanos = pausedObservedAtNanos,
+                    )
+                }
+            }
             // A media session commonly reports PAUSED while audio focus is
             // moving to TTS. Once preparation or speech has been committed,
             // keep that batch alive; otherwise a real user pause still cancels
@@ -1919,29 +2217,21 @@ class TrackVoiceController(
         if (!plan.pauseBeforeAnnouncement) {
             // If a previous "announce then play" batch was interrupted, do not
             // carry its pause token into a new "play immediately" announcement.
-            resumePausedPlayback()
+            finishAnnouncementAudio(trigger = PlaybackRestoreTrigger.NON_PAUSE_MODE)
         }
         audioFocusManager.abandon()
-        if (pausedPlayback == null && plan.pauseBeforeAnnouncement) {
-            pausedPlayback = monitor?.pauseSelectedIfPlaying(
-                expectedEvent = event,
-                expectedSessionKey = sessionKey,
-            ) { pauseRequestedAtNanos ->
-                TrackTalkDebugLog.event(
-                    "TRANSITION_TIMING",
-                    "stage" to "T3_PAUSE_REQUESTED",
-                    "elapsedRealtimeNanos" to pauseRequestedAtNanos,
-                    "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(pauseRequestedAtNanos),
-                    "mediaId" to event?.mediaId,
-                )
-            }
+        val cycleId = if (plan.pauseBeforeAnnouncement) {
+            armPlaybackRestore(event, sessionKey, transitionAtElapsedNanos)
+        } else {
+            null
         }
         TrackTalkDebugLog.event(
             "audio_protection",
             "mediaId" to event?.mediaId,
             "title" to event?.title,
             "pauseBeforeAnnouncement" to plan.pauseBeforeAnnouncement,
-            "pauseToken" to (pausedPlayback != null),
+            "pauseToken" to (cycleId != null),
+            "announcementCycleId" to cycleId,
             "duck" to plan.shouldDuckMusic,
             "musicAttenuationStrategy" to plan.musicAttenuationStrategy,
             "elapsedSinceObservedMs" to event?.let { preparationStartedAt - it.observedAt },
@@ -1950,9 +2240,12 @@ class TrackVoiceController(
         // In pause-until-finished mode, a focus request can pause a media app
         // even when its session was too transient to return a resume token.
         val shouldRequestAudioFocus = plan.requestAudioFocus &&
-            (!plan.pauseBeforeAnnouncement || pausedPlayback != null)
+            (!plan.pauseBeforeAnnouncement || cycleId != null)
         if (shouldRequestAudioFocus && !audioFocusManager.request(plan.shouldDuckMusic)) {
-            finishAnnouncementAudio()
+            finishAnnouncementAudio(
+                trigger = PlaybackRestoreTrigger.AUDIO_FOCUS_FAILED,
+                cycleId = cycleId,
+            )
             _diagnostics.value = _diagnostics.value.copy(
                 lastAnnouncementAt = System.currentTimeMillis(),
                 lastAnnouncementSucceeded = false,
@@ -2297,17 +2590,30 @@ class TrackVoiceController(
 
     private fun finishAnnouncementAudio(
         transitionAtElapsedNanos: Long? = activeSpeechTransitionAtElapsedNanos,
+        trigger: PlaybackRestoreTrigger = PlaybackRestoreTrigger.ANNOUNCEMENT_CANCELLED,
+        cycleId: Long? = playbackRestoreObligation.activeCycle()?.id,
+        speechGeneration: Long? = null,
     ) {
         val restoreRequestedAtNanos = SystemClock.elapsedRealtimeNanos()
         TrackTalkDebugLog.event(
             "TRANSITION_TIMING",
             "stage" to "T8_PLAYBACK_RESTORE_REQUESTED",
+            "announcementCycleId" to cycleId,
             "elapsedRealtimeNanos" to restoreRequestedAtNanos,
             "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(restoreRequestedAtNanos),
+            "reason" to trigger,
         )
-        TrackTalkDebugLog.event("playback_restore")
+        TrackTalkDebugLog.event(
+            "playback_restore",
+            "announcementCycleId" to cycleId,
+            "reason" to trigger,
+        )
         audioFocusManager.abandon()
-        resumePausedPlayback()
+        resumePausedPlayback(
+            trigger = trigger,
+            cycleId = cycleId,
+            speechGeneration = speechGeneration,
+        )
     }
 
     private data class PreparedAnnouncement(

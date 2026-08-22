@@ -170,6 +170,7 @@ class TtsEngine internal constructor(
         transitionAtMs: Long? = null,
         transitionAtElapsedNanos: Long? = null,
         voiceNameOverride: String? = null,
+        announcementCycleId: Long? = null,
         onFinished: (success: Boolean, message: DiagnosticMessage) -> Unit,
     ) = speakWithVoicePlan(
         text = text,
@@ -178,6 +179,7 @@ class TtsEngine internal constructor(
         transitionAtElapsedNanos = transitionAtElapsedNanos,
         voiceNameOverride = voiceNameOverride,
         preparedVoicePlan = null,
+        announcementCycleId = announcementCycleId,
         onFinished = onFinished,
     )
 
@@ -188,6 +190,7 @@ class TtsEngine internal constructor(
         transitionAtElapsedNanos: Long? = null,
         voiceNameOverride: String? = null,
         preparedVoicePlan: PreparedTtsVoicePlan?,
+        announcementCycleId: Long? = null,
         onFinished: (success: Boolean, message: DiagnosticMessage) -> Unit,
     ) {
         val requestId = warmPathObserver?.let { "trackvoice-request-${System.nanoTime()}" }
@@ -208,6 +211,11 @@ class TtsEngine internal constructor(
             pendingResults.values.distinct().forEach { batch ->
                 if (!batch.completed) {
                     batch.completed = true
+                    TrackTalkDebugLog.event(
+                        "TTS_INTERRUPTED",
+                        "announcementCycleId" to batch.announcementCycleId,
+                        "elapsedRealtimeNanos" to SystemClock.elapsedRealtimeNanos(),
+                    )
                     batch.callback(false, DiagnosticMessage.TTS_INTERRUPTED)
                 }
             }
@@ -229,9 +237,14 @@ class TtsEngine internal constructor(
             logVoiceGainDiagnostic(settings, ttsParamVolume)
             val fallbackLocale = settings.voiceLanguage.toLocale(text)
             val segments = MixedLanguageSegmenter.segment(text, fallbackLocale)
-            val batch = PendingBatch(segments.size, onFinished)
+            val batch = PendingBatch(
+                remaining = segments.size,
+                callback = onFinished,
+                announcementCycleId = announcementCycleId,
+            )
             TrackTalkDebugLog.event(
                 "tts_enqueue",
+                "announcementCycleId" to announcementCycleId,
                 "segments" to segments.size,
                 "textLength" to text.length,
                 "volume" to ttsParamVolume,
@@ -403,6 +416,7 @@ class TtsEngine internal constructor(
     private data class PendingBatch(
         var remaining: Int,
         val callback: (Boolean, DiagnosticMessage) -> Unit,
+        val announcementCycleId: Long? = null,
         var completed: Boolean = false,
     )
 
@@ -430,6 +444,7 @@ class TtsEngine internal constructor(
             TrackTalkDebugLog.event(
                 "TTS_STARTED",
                 "utteranceId" to utteranceId,
+                "announcementCycleId" to utteranceId?.let(pendingResults::get)?.announcementCycleId,
                 "elapsedRealtimeNanos" to startedAtNanos,
                 "transitionToTtsStartMonotonicMs" to utteranceId?.let { id ->
                     utteranceTransitionAtElapsedNanos[id]?.let { startAt ->
@@ -467,6 +482,8 @@ class TtsEngine internal constructor(
                     TrackTalkDebugLog.event(
                         "TTS_COMPLETED",
                         "utteranceId" to utteranceId,
+                        "announcementCycleId" to batch.announcementCycleId,
+                        "elapsedRealtimeNanos" to completedAtNanos,
                     )
                     batch.callback(true, DiagnosticMessage.TTS_COMPLETED)
                 }
@@ -476,7 +493,12 @@ class TtsEngine internal constructor(
         @Deprecated("Deprecated in Android API; kept for TTS compatibility")
         override fun onError(utteranceId: String?) {
             if (utteranceId == null) return
-            TrackTalkDebugLog.event("tts_error", "utteranceId" to utteranceId)
+            TrackTalkDebugLog.event(
+                "tts_error",
+                "utteranceId" to utteranceId,
+                "announcementCycleId" to pendingResults[utteranceId]?.announcementCycleId,
+                "elapsedRealtimeNanos" to SystemClock.elapsedRealtimeNanos(),
+            )
             mainHandler.post {
                 utteranceTransitionAtMs.remove(utteranceId)
                 utteranceTransitionAtElapsedNanos.remove(utteranceId)
@@ -488,7 +510,13 @@ class TtsEngine internal constructor(
 
         override fun onError(utteranceId: String?, errorCode: Int) {
             if (utteranceId == null) return
-            TrackTalkDebugLog.event("tts_error", "utteranceId" to utteranceId, "errorCode" to errorCode)
+            TrackTalkDebugLog.event(
+                "tts_error",
+                "utteranceId" to utteranceId,
+                "announcementCycleId" to pendingResults[utteranceId]?.announcementCycleId,
+                "errorCode" to errorCode,
+                "elapsedRealtimeNanos" to SystemClock.elapsedRealtimeNanos(),
+            )
             mainHandler.post {
                 utteranceTransitionAtMs.remove(utteranceId)
                 utteranceTransitionAtElapsedNanos.remove(utteranceId)
@@ -502,6 +530,12 @@ class TtsEngine internal constructor(
     private fun failBatch(batch: PendingBatch, message: DiagnosticMessage) {
         if (batch.completed) return
         batch.completed = true
+        TrackTalkDebugLog.event(
+            "TTS_FAILED",
+            "announcementCycleId" to batch.announcementCycleId,
+            "message" to message,
+            "elapsedRealtimeNanos" to SystemClock.elapsedRealtimeNanos(),
+        )
         pendingResults.filterValues { it === batch }.keys.forEach(utteranceTransitionAtMs::remove)
         pendingResults.filterValues { it === batch }.keys.forEach(utteranceTransitionAtElapsedNanos::remove)
         pendingResults.filterValues { it === batch }.keys.forEach(utteranceRequestIds::remove)
