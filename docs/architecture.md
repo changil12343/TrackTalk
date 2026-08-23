@@ -35,7 +35,8 @@ not recreate those decisions independently.
 | Area | Source owner | Responsibility |
 | --- | --- | --- |
 | Process construction | `TrackVoiceApplication` | Creates repository, billing manager, controller. |
-| Permission/lifecycle bridge | `service/TrackVoiceNotificationListenerService` | Attaches/detaches session monitoring, status notification, screen events. |
+| Permission/lifecycle bridge | `service/TrackVoiceNotificationListenerService` | Attaches/detaches session monitoring, exposes listener state, and handles screen events. |
+| Status notification | `service/TrackVoiceStatusNotificationManager` | App-scoped observer that renders the optional status shortcut from controller state and applies its explicit enable/disable action. |
 | Session observation | `media/MediaSessionMonitor` | Tracks controllers, maps callbacks, selects a current session, issues scoped pause/resume commands. |
 | Metadata mapping | `media/TrackMetadataMapper` | Normalizes metadata, queue descriptions, IDs, durations, and reliable track-number provenance. |
 | Playback semantics | `media/PlaybackEvent`, `TemporalPlaybackContextResolver`, `NextTrackPrefetch` | Represents a snapshot, conservative context evidence, metadata-only preparation. |

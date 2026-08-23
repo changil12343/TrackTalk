@@ -68,10 +68,12 @@ Automation does not bypass:
 
 ## Status-bar shortcut
 
-The persistent shortcut notification is created by
-`TrackVoiceNotificationListenerService` when the listener is connected and
-`showStatusNotification` is enabled. It uses a low-importance notification
-channel and opens TrackTalk; it is not a substitute for media detection.
+The persistent shortcut notification is owned by the app-scoped
+`TrackVoiceStatusNotificationManager` and observes listener/controller state
+when `showStatusNotification` is enabled. It uses a low-importance channel,
+opens TrackTalk from its content intent, and exposes one idempotent explicit
+action to enable or disable TrackTalk. It is not a substitute for media
+detection.
 
 On Android versions requiring `POST_NOTIFICATIONS`, permission is optional.
 Core MediaSession detection works without it. Home progressively reveals the

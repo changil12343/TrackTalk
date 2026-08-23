@@ -24,6 +24,7 @@ captures/
 .android-user-home/
 .gradle-user-home/
 artifacts/screenshots/
+artifacts/logs/
 
 # OS metadata
 .DS_Store
