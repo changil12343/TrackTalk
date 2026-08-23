@@ -2,6 +2,7 @@ package com.trackvoice.announcement
 
 import android.media.AudioAttributes
 import android.os.Bundle
+import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.speech.tts.TextToSpeech
@@ -94,6 +95,42 @@ class TtsEngineWarmPathInstrumentedTest {
         assertEquals(listOf("english", "korean", "english", "korean"), provider.spokenVoiceNames)
         assertEquals(listOf("english", "korean", "english", "korean"), provider.setVoiceCalls)
         assertEquals(1, provider.availableVoiceCalls)
+    }
+
+    @Test
+    fun mixedLanguageDoesNotReconfigureVoiceBeforePriorSegmentCompletes() {
+        val provider = FakeTtsProvider(
+            catalogs = listOf(
+                listOf(
+                    voice("english", "en-US"),
+                    voice("korean", "ko-KR"),
+                ),
+            ),
+            autoComplete = false,
+        )
+        val tts = createEngine(provider)
+        val finished = CountDownLatch(1)
+        val settings = UserSettings(
+            voiceLanguage = VoiceLanguage.AUTO,
+            genderFilter = GenderFilter.ANY,
+        )
+
+        instrumentation.runOnMainSync {
+            tts.speak("Hello. 안녕하세요.", settings) { _, _ -> finished.countDown() }
+        }
+        instrumentation.waitForIdleSync()
+
+        assertEquals(listOf("english"), provider.setVoiceCalls)
+        assertEquals(listOf("english"), provider.spokenVoiceNames)
+
+        provider.completeNext()
+        instrumentation.waitForIdleSync()
+
+        assertEquals(listOf("english", "korean"), provider.setVoiceCalls)
+        assertEquals(listOf("english", "korean"), provider.spokenVoiceNames)
+
+        provider.completeNext()
+        assertTrue(finished.await(3L, TimeUnit.SECONDS))
     }
 
     @Test
@@ -254,10 +291,12 @@ class TtsEngineWarmPathInstrumentedTest {
     private class FakeTtsProvider(
         catalogs: List<List<VoiceDescriptor>>,
         private val failingVoiceNames: Set<String> = emptySet(),
+        private val autoComplete: Boolean = true,
     ) : TtsProvider {
         private val catalogs = ArrayDeque(catalogs)
         private var listener: UtteranceProgressListener? = null
         private var activeVoiceName: String? = null
+        private val pendingUtteranceIds = ArrayDeque<String>()
 
         var availableVoiceCalls: Int = 0
             private set
@@ -271,7 +310,11 @@ class TtsEngineWarmPathInstrumentedTest {
 
         override val providerId: String = "fake"
 
-        override fun initialize(onReady: (Boolean) -> Unit) = onReady(true)
+        override fun initialize(onReady: (Boolean) -> Unit) {
+            // Android TextToSpeech reports readiness asynchronously. Keep the
+            // fake from invoking the callback reentrantly during construction.
+            Handler(Looper.getMainLooper()).post { onReady(true) }
+        }
         override fun setProgressListener(listener: UtteranceProgressListener) {
             this.listener = listener
         }
@@ -301,9 +344,19 @@ class TtsEngineWarmPathInstrumentedTest {
         override fun speak(text: String, queueMode: Int, params: Bundle, utteranceId: String): Int {
             spokenVoiceNames += activeVoiceName
             speakWasOnMain += Looper.myLooper() == Looper.getMainLooper()
+            if (autoComplete) {
+                listener?.onStart(utteranceId)
+                listener?.onDone(utteranceId)
+            } else {
+                pendingUtteranceIds += utteranceId
+            }
+            return TextToSpeech.SUCCESS
+        }
+
+        fun completeNext() {
+            val utteranceId = pendingUtteranceIds.removeFirst()
             listener?.onStart(utteranceId)
             listener?.onDone(utteranceId)
-            return TextToSpeech.SUCCESS
         }
         override fun stop() = Unit
         override fun shutdown() = Unit

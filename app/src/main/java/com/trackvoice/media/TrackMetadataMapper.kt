@@ -254,6 +254,7 @@ class TrackMetadataMapper(
             mediaId = mediaId,
             playbackState = state.toPlaybackStatus(),
             playbackPosition = state?.position?.takeIf { it >= 0L },
+            playbackStateUpdateElapsedMs = state?.lastPositionUpdateTime?.takeIf { it > 0L },
             queue = queue,
             observedAt = observedAt,
             queueTitle = controller.queueTitle?.toString().clean(),

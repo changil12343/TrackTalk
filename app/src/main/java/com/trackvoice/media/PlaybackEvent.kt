@@ -35,6 +35,8 @@ data class PlaybackEvent(
     val mediaId: String?,
     val playbackState: PlaybackStatus,
     val playbackPosition: Long?,
+    /** PlaybackState.lastPositionUpdateTime in elapsed-realtime milliseconds. */
+    val playbackStateUpdateElapsedMs: Long? = null,
     val queue: List<QueueItemSnapshot> = emptyList(),
     val observedAt: Long,
     val queueTitle: String? = null,

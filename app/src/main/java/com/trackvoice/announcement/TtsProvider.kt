@@ -35,6 +35,9 @@ typealias InstalledVoice = VoiceDescriptor
 interface TtsProvider {
     val providerId: String
 
+    /** Runtime engine selected behind a provider adapter, when discoverable. */
+    val runtimeEngineId: String? get() = null
+
     fun initialize(onReady: (Boolean) -> Unit)
     fun setProgressListener(listener: UtteranceProgressListener)
     fun setAudioAttributes(attributes: AudioAttributes): Boolean
@@ -56,13 +59,18 @@ interface TtsProvider {
 class AndroidSystemTtsProvider(context: Context) : TtsProvider {
     private val appContext = context.applicationContext
     private var engine: TextToSpeech? = null
+    @Volatile
+    private var runtimeEngineName: String? = null
     private var platformVoicesByName: Map<String, android.speech.tts.Voice> = emptyMap()
 
     override val providerId: String = PROVIDER_ID
+    override val runtimeEngineId: String?
+        get() = runtimeEngineName
 
     override fun initialize(onReady: (Boolean) -> Unit) {
         if (engine != null) return
         engine = TextToSpeech(appContext) { status ->
+            runtimeEngineName = runCatching { engine?.defaultEngine }.getOrNull()
             onReady(status == TextToSpeech.SUCCESS)
         }
     }
@@ -124,6 +132,7 @@ class AndroidSystemTtsProvider(context: Context) : TtsProvider {
     override fun shutdown() {
         runCatching { engine?.shutdown() }
         engine = null
+        runtimeEngineName = null
         platformVoicesByName = emptyMap()
     }
 

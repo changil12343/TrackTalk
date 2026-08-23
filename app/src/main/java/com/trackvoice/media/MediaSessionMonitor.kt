@@ -103,6 +103,7 @@ class MediaSessionMonitor(
     fun pauseSelectedIfPlaying(
         expectedEvent: PlaybackEvent? = null,
         expectedSessionKey: String? = null,
+        announcementCycleId: Long? = null,
         onPauseRequested: ((elapsedRealtimeNanos: Long) -> Unit)? = null,
     ): PlaybackPauseToken? = runOnMonitorThread {
         // A new announcement owns the pause/resume lifecycle. Do not let a
@@ -135,6 +136,7 @@ class MediaSessionMonitor(
             runCatching { onPauseRequested?.invoke(pauseRequestedAtNanos) }
             TrackTalkDebugLog.event(
                 "PLAYBACK_PAUSE_REQUESTED",
+                "announcementCycleId" to announcementCycleId,
                 "elapsedRealtimeNanos" to pauseRequestedAtNanos,
                 "source" to event.sourcePackageName,
                 "mediaId" to event.mediaId,
@@ -172,6 +174,7 @@ class MediaSessionMonitor(
     fun resumePlayback(
         token: PlaybackPauseToken,
         announcementCycleId: Long? = null,
+        ownedPauseAcknowledged: Boolean = false,
         onEvent: (PlaybackRestoreEvent) -> Unit = {},
     ) {
         runOnMonitorThread {
@@ -186,6 +189,7 @@ class MediaSessionMonitor(
                 token = token,
                 callback = onEvent,
                 initialStateWasPlaying = initialState == PlaybackState.STATE_PLAYING,
+                ownedPauseAcknowledged = ownedPauseAcknowledged,
                 sessionRecoveryDeadlineElapsedNanos = restoreRequestedAtNanos +
                     SESSION_RECOVERY_TIMEOUT_MS * NANOS_PER_MILLISECOND,
             )
@@ -576,6 +580,24 @@ class MediaSessionMonitor(
         }
         request.waitingForSession = false
         request.lastSessionWaitReason = null
+
+        // If TrackTalk already observed its own PAUSED acknowledgement and the
+        // exact owned track is PLAYING now, a newer actor has restored it. A
+        // second PLAY is redundant and can make some providers visibly bounce.
+        // The unacknowledged late-PAUSE case still uses the existing play fence.
+        if (
+            request.ownedPauseAcknowledged &&
+            request.playCommandCount == 0 &&
+            candidate.event.isPlaying
+        ) {
+            request.playingObserved = true
+            completeRestore(
+                request,
+                PlaybackRestoreEventType.PLAYING_CONFIRMED,
+                "ALREADY_PLAYING_AFTER_OWNED_PAUSE",
+            )
+            return
+        }
 
         val requestedAtNanos = SystemClock.elapsedRealtimeNanos()
         val attempt = synchronized(request) {
@@ -1010,6 +1032,7 @@ class MediaSessionMonitor(
         val token: PlaybackPauseToken,
         val callback: (PlaybackRestoreEvent) -> Unit,
         val initialStateWasPlaying: Boolean,
+        val ownedPauseAcknowledged: Boolean,
         val sessionRecoveryDeadlineElapsedNanos: Long,
         @Volatile var playCommandCount: Int = 0,
         @Volatile var commandInFlight: Boolean = false,

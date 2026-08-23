@@ -62,6 +62,13 @@ Pending announcement text/event data is replaceable only when the incoming
 event matches the same logical current track. A newer confirmed track cancels
 old pending work; no late speech for an obsolete prediction is allowed.
 
+At a hard playback boundary, a position reset paired with the last accepted
+track's stale metadata is not immediately a new occurrence. The boundary
+identity guard defers that ambiguous frame for one bounded metadata
+confirmation; a confirmed replacement track proceeds normally, while a stable
+same-track restart remains eligible. This guard validates identity only: it
+does not pause, duck, seek, or otherwise control playback.
+
 ## Owned-pause restore lifecycle
 
 Playback restore is an ownership state machine, not a general attempt to make
@@ -75,6 +82,11 @@ then reserves one restore-cycle ID and binds it to the session generation and
 the speech generation. Only one cycle can be active. Every completion,
 callback, retry, or watchdog action must match that cycle; stale cycles and
 callbacks are ignored rather than applied to whichever player is now selected.
+
+Replayed states with the same framework update timestamp remain harmless
+controller churn. Once TrackTalk's own pause is acknowledged, an observable
+newer `PLAYING`, `PAUSED`, or `STOPPED` state disqualifies the pending automatic
+restore rather than being overridden by a stale `PLAY` request.
 
 Metadata and queue callbacks may be mixed or incomplete while a provider
 refreshes its controller. `PlaybackRestoreTrackMatcher` accepts only a

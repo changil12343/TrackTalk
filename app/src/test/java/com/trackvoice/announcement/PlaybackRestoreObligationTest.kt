@@ -96,6 +96,83 @@ class PlaybackRestoreObligationTest {
     }
 
     @Test
+    fun samePausedStateTimestampFromControllerRecreationIsHarmless() {
+        val obligation = armed()
+        val cycle = obligation.activeCycle()!!
+
+        assertEquals(
+            PlaybackRestorePlayerObservation.OWNED_PAUSE_CONFIRMED,
+            obligation.observePlayerState(cycle.id, PlaybackStatus.PAUSED, 200L, 180L),
+        )
+        assertEquals(
+            PlaybackRestorePlayerObservation.DUPLICATE_OR_STALE,
+            obligation.observePlayerState(cycle.id, PlaybackStatus.PAUSED, 260L, 180L),
+        )
+        assertNull(obligation.newerPlaybackIntentReason(cycle.id))
+        assertSame(cycle, obligation.requestRestore(cycle.id, PlaybackRestoreTrigger.TTS_COMPLETED))
+    }
+
+    @Test
+    fun newerPauseDuringTtsSuppressesAutomaticRestore() {
+        val obligation = armed()
+        val cycle = obligation.activeCycle()!!
+
+        assertEquals(
+            PlaybackRestorePlayerObservation.OWNED_PAUSE_CONFIRMED,
+            obligation.observePlayerState(cycle.id, PlaybackStatus.PAUSED, 200L, 180L),
+        )
+        assertEquals(
+            PlaybackRestorePlayerObservation.NEWER_PAUSE_OR_STOP_INTENT,
+            obligation.observePlayerState(cycle.id, PlaybackStatus.PAUSED, 300L, 280L),
+        )
+        assertEquals(
+            "NEWER_PAUSED_STATE_AFTER_OWNED_PAUSE",
+            obligation.newerPlaybackIntentReason(cycle.id),
+        )
+        assertNull(obligation.requestRestore(cycle.id, PlaybackRestoreTrigger.TTS_COMPLETED))
+    }
+
+    @Test
+    fun externalPlaybackDuringTtsPreventsRedundantTrackTalkPlay() {
+        val obligation = armed()
+        val cycle = obligation.activeCycle()!!
+
+        obligation.observePlayerState(cycle.id, PlaybackStatus.PAUSED, 200L, 180L)
+        assertEquals(
+            PlaybackRestorePlayerObservation.INTERVENING_PLAYBACK,
+            obligation.observePlayerState(cycle.id, PlaybackStatus.PLAYING, 300L, 280L),
+        )
+        assertEquals("PLAYING_AFTER_OWNED_PAUSE", obligation.newerPlaybackIntentReason(cycle.id))
+        assertNull(obligation.requestRestore(cycle.id, PlaybackRestoreTrigger.TTS_COMPLETED))
+    }
+
+    @Test
+    fun externalPlaybackThenPauseAroundCompletionPreservesNewerPause() {
+        val obligation = armed()
+        val cycle = obligation.activeCycle()!!
+
+        obligation.observePlayerState(cycle.id, PlaybackStatus.PAUSED, 200L, 180L)
+        obligation.observePlayerState(cycle.id, PlaybackStatus.PLAYING, 300L, 280L)
+        assertEquals(
+            PlaybackRestorePlayerObservation.NEWER_PAUSE_OR_STOP_INTENT,
+            obligation.observePlayerState(cycle.id, PlaybackStatus.PAUSED, 400L, 380L),
+        )
+        assertEquals("PLAYING_AFTER_OWNED_PAUSE", obligation.newerPlaybackIntentReason(cycle.id))
+        assertNull(obligation.requestRestore(cycle.id, PlaybackRestoreTrigger.WATCHDOG_TIMEOUT))
+    }
+
+    @Test
+    fun interruptionWhileIdleCannotCreateRestoreOwnership() {
+        val obligation = PlaybackRestoreObligation()
+
+        assertEquals(
+            PlaybackRestorePlayerObservation.IGNORED,
+            obligation.observePlayerState(1L, PlaybackStatus.PAUSED, 200L, 180L),
+        )
+        assertNull(obligation.requestRestore(1L, PlaybackRestoreTrigger.TTS_COMPLETED))
+    }
+
+    @Test
     fun userPauseAfterInterveningPlaybackIsRecognizedAsNewIntent() {
         val obligation = armed()
         val cycle = obligation.activeCycle()!!

@@ -157,11 +157,15 @@ class AnnounceThenPlayLatencyInstrumentedTest {
             session.release()
         }
         mainHandler.removeCallbacksAndMessages(null)
-        app.repository.updateUserSettings { originalSettings }
-        originalAppSettings?.let { app.repository.updateAppSettings(it) }
-            ?: app.repository.removeApp(context.packageName)
-        originalPersistedAnnouncement?.let { app.repository.savePersistedAnnouncement(it) }
-            ?: app.repository.clearPersistedAnnouncement()
+        // JUnit still invokes @After when the notification-access assumption
+        // skips setUp. Restore only state that was actually captured.
+        if (::originalSettings.isInitialized) {
+            app.repository.updateUserSettings { originalSettings }
+            originalAppSettings?.let { app.repository.updateAppSettings(it) }
+                ?: app.repository.removeApp(context.packageName)
+            originalPersistedAnnouncement?.let { app.repository.savePersistedAnnouncement(it) }
+                ?: app.repository.clearPersistedAnnouncement()
+        }
         if (::premiumStateFlow.isInitialized) premiumStateFlow.value = originalPremiumState
         app.controller.attachNotificationListener()
         app.controller.attachMediaSessionMonitor(context)

@@ -15,8 +15,11 @@ import com.trackvoice.announcement.AnnouncementAudioTiming
 import com.trackvoice.announcement.NextTrackAnnouncementPreparation
 import com.trackvoice.announcement.PreparedNextAnnouncement
 import com.trackvoice.announcement.PreparedTtsVoicePlan
+import com.trackvoice.announcement.BoundaryIdentityCoherenceGuard
+import com.trackvoice.announcement.BoundaryIdentityDecision
 import com.trackvoice.announcement.PlaybackRestoreObligation
 import com.trackvoice.announcement.PlaybackRestoreCycleState
+import com.trackvoice.announcement.PlaybackRestorePlayerObservation
 import com.trackvoice.announcement.PlaybackRestoreTrigger
 import com.trackvoice.announcement.PlaybackRestoreWatchdogPolicy
 import com.trackvoice.announcement.ConnectedAudioDevice
@@ -212,6 +215,8 @@ class TrackVoiceController(
     private var monitor: MediaSessionMonitor? = null
     private val playbackRestoreObligation = PlaybackRestoreObligation()
     private var playbackRestoreWatchdogJob: Job? = null
+    private val boundaryIdentityCoherenceGuard = BoundaryIdentityCoherenceGuard()
+    private var boundaryIdentityConfirmationJob: Job? = null
     private var activeSpeechTrack: PlaybackEvent? = null
     private var lastAnnouncedTrack: PlaybackEvent? = null
     private var lastAnnouncedAt: Long = Long.MIN_VALUE
@@ -224,6 +229,7 @@ class TrackVoiceController(
     private var hardPlaybackBoundaryAllowsSameSession = false
     private var lastActualTrackChangeAtMs: Long? = null
     private var lastActualTrackChangeAtElapsedNanos: Long? = null
+    private var lastActualTrackChangeLatencyCycleId: String? = null
     private var lastActualTrackChangeUsedPrefetch = false
     private var pausedObservedForTransitionAtElapsedNanos: Long? = null
     private var activeSpeechTransitionAtElapsedNanos: Long? = null
@@ -237,6 +243,7 @@ class TrackVoiceController(
     private var latestConnectedAudioDevices: List<ConnectedAudioDevice> = emptyList()
     private val externalMetadataCache = mutableMapOf<String, ExternalMetadataCacheEntry>()
     private val externalMetadataLookupJobs = mutableMapOf<String, Job>()
+    private val latencyCycleByRestoreCycleId = mutableMapOf<Long, String>()
 
     private val _mediaState = MutableStateFlow(MediaUiState())
     private val _diagnostics = MutableStateFlow(DiagnosticsState())
@@ -356,6 +363,7 @@ class TrackVoiceController(
             "duplicateHistoryPreserved" to (preservePlaybackHistory && lastAnnouncedTrack != null),
             "lastAnnouncedSessionKey" to lastAnnouncedSessionKey,
         )
+        cancelBoundaryIdentityConfirmation()
         speechGeneration += 1
         activeSpeechTrack = null
         cancelPendingAnnouncement()
@@ -433,11 +441,13 @@ class TrackVoiceController(
     fun togglePlayback(): Boolean? {
         // A UI/tile playback command is explicit user intent. It must own the
         // next state instead of a delayed automatic restore from old speech.
+        cancelBoundaryIdentityConfirmation()
         cancelPlaybackRestoreWithoutResume("USER_TOGGLE")
         return monitor?.toggleSelectedPlayback()
     }
 
     fun isPlaybackPlaying(): Boolean? = monitor?.isSelectedPlaybackPlaying()
+
     /**
      * The optional status notification reads the same route resolver used by
      * announcement policy. It never owns a route or changes playback.
@@ -484,6 +494,7 @@ class TrackVoiceController(
         cancelPendingAnnouncement()
         activeSpeechTrack = null
         val generation = ++speechGeneration
+        val manualTraceId = "manual-s$generation"
         val settings = effectiveSettings()
         val plan = AnnouncementPlaybackPlanner.plan(settings)
         if (!plan.pauseBeforeAnnouncement) {
@@ -509,7 +520,12 @@ class TrackVoiceController(
         // let TTS play over the current state and avoid leaving music stopped.
         val shouldRequestAudioFocus = plan.requestAudioFocus &&
             (!plan.pauseBeforeAnnouncement || cycleId != null)
-        if (shouldRequestAudioFocus && !audioFocusManager.request(plan.shouldDuckMusic)) {
+        if (shouldRequestAudioFocus && !audioFocusManager.request(
+                duck = plan.shouldDuckMusic,
+                announcementCycleId = cycleId,
+                latencyCycleId = manualTraceId,
+            )
+        ) {
             audioFocusManager.abandon()
             finishAnnouncementAudio(
                 trigger = PlaybackRestoreTrigger.AUDIO_FOCUS_FAILED,
@@ -535,6 +551,7 @@ class TrackVoiceController(
             settings = settings,
             voiceNameOverride = voiceNameOverride,
             announcementCycleId = cycleId,
+            latencyCycleId = manualTraceId,
         ) { success, message ->
             if (generation == speechGeneration) {
                 if (shouldRequestAudioFocus) audioFocusManager.abandon()
@@ -560,6 +577,7 @@ class TrackVoiceController(
         transitionAtMs: Long? = null,
         transitionAtElapsedNanos: Long? = null,
         preparedVoicePlan: PreparedTtsVoicePlan? = null,
+        latencyCycleId: String? = null,
     ) {
         if (!isPendingAnnouncement(pendingToken, fingerprint)) return
         if (preparedAnnouncement?.fingerprint != fingerprint || preparedAnnouncement?.token != pendingToken) return
@@ -584,6 +602,7 @@ class TrackVoiceController(
             transitionAtElapsedNanos = transitionAtElapsedNanos,
             preparedVoicePlan = preparedVoicePlan,
             announcementCycleId = cycleId,
+            latencyCycleId = latencyCycleId,
         ) { success, message ->
             if (generation == speechGeneration) {
                 activeSpeechTrack = null
@@ -634,6 +653,7 @@ class TrackVoiceController(
     }
 
     fun close() {
+        cancelBoundaryIdentityConfirmation()
         speechGeneration += 1
         activeSpeechTrack = null
         lastAnnouncedTrack = null
@@ -642,6 +662,7 @@ class TrackVoiceController(
         selectedSessionKey = null
         lastActualTrackChangeAtMs = null
         lastActualTrackChangeAtElapsedNanos = null
+        lastActualTrackChangeLatencyCycleId = null
         lastActualTrackChangeUsedPrefetch = false
         pausedObservedForTransitionAtElapsedNanos = null
         activeSpeechTransitionAtElapsedNanos = null
@@ -653,6 +674,7 @@ class TrackVoiceController(
         externalMetadataLookupJobs.values.forEach(Job::cancel)
         externalMetadataLookupJobs.clear()
         externalMetadataCache.clear()
+        latencyCycleByRestoreCycleId.clear()
         duplicateSuppressor.clear()
         temporalContextResolver.reset()
         cancelPendingAnnouncement()
@@ -757,6 +779,7 @@ class TrackVoiceController(
         event: PlaybackEvent?,
         sessionKey: String?,
         transitionAtElapsedNanos: Long?,
+        latencyCycleId: String? = null,
     ): Long? {
         playbackRestoreObligation.activeCycle()?.let { active ->
             if (active.state != PlaybackRestoreCycleState.ARMED) {
@@ -781,7 +804,17 @@ class TrackVoiceController(
         val pauseToken = monitor?.pauseSelectedIfPlaying(
             expectedEvent = event,
             expectedSessionKey = sessionKey,
+            announcementCycleId = cycleId,
         ) { pauseRequestedAtNanos ->
+            TrackTalkDebugLog.event(
+                "ANNOUNCEMENT_LATENCY",
+                "latencyCycleId" to latencyCycleId,
+                "stage" to "T4_AUDIO_INTERVENTION_REQUESTED",
+                "intervention" to "MEDIA_PAUSE",
+                "elapsedRealtimeNanos" to pauseRequestedAtNanos,
+                "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(pauseRequestedAtNanos),
+                "mediaId" to event?.mediaId,
+            )
             TrackTalkDebugLog.event(
                 "TRANSITION_TIMING",
                 "stage" to "T3_PAUSE_REQUESTED",
@@ -806,6 +839,9 @@ class TrackVoiceController(
             armedAtElapsedNanos = armedAtNanos,
             transitionAtElapsedNanos = transitionAtElapsedNanos,
         )
+        if (latencyCycleId != null) {
+            latencyCycleByRestoreCycleId[cycleId] = latencyCycleId
+        }
         logRestoreCycle(
             cycleId = cycleId,
             stage = "OWNERSHIP_ARMED",
@@ -826,6 +862,16 @@ class TrackVoiceController(
         speechGeneration: Long? = null,
     ) {
         val id = cycleId ?: return
+        playbackRestoreObligation.newerPlaybackIntentReason(id)?.let { newerIntentReason ->
+            logRestoreCycle(
+                cycleId = id,
+                stage = "RESTORE_SUPPRESSED",
+                event = playbackRestoreObligation.activeCycle()?.track,
+                reason = "NEWER_PLAYBACK_INTENT_$newerIntentReason",
+            )
+            cancelPlaybackRestoreWithoutResume("NEWER_PLAYBACK_INTENT_$newerIntentReason")
+            return
+        }
         val cycle = playbackRestoreObligation.requestRestore(id, trigger, speechGeneration) ?: run {
             logRestoreCycle(
                 cycleId = id,
@@ -853,12 +899,56 @@ class TrackVoiceController(
         currentMonitor.resumePlayback(
             token = cycle.pauseToken,
             announcementCycleId = cycle.id,
+            ownedPauseAcknowledged = cycle.pausedObservedAtElapsedNanos != null,
             onEvent = ::handlePlaybackRestoreEvent,
         )
     }
 
     private fun handlePlaybackRestoreEvent(event: PlaybackRestoreEvent) {
         val cycleId = event.announcementCycleId ?: return
+        val activeCycle = playbackRestoreObligation.activeCycle()?.takeIf { it.id == cycleId }
+        val latencyCycleId = latencyCycleByRestoreCycleId[cycleId]
+        when (event.type) {
+            PlaybackRestoreEventType.PLAY_REQUESTED -> TrackTalkDebugLog.event(
+                "ANNOUNCEMENT_LATENCY",
+                "latencyCycleId" to latencyCycleId,
+                "stage" to "T11_RESTORE_PLAY_ISSUED",
+                "announcementCycleId" to cycleId,
+                "elapsedRealtimeNanos" to event.elapsedRealtimeNanos,
+                "transitionElapsedMs" to activeCycle?.transitionAtElapsedNanos.elapsedMillisUntil(
+                    event.elapsedRealtimeNanos,
+                ),
+                "attempt" to event.attempt,
+                "reason" to event.reason,
+            )
+
+            PlaybackRestoreEventType.PLAYING_CONFIRMED -> TrackTalkDebugLog.event(
+                "ANNOUNCEMENT_LATENCY",
+                "latencyCycleId" to latencyCycleId,
+                "stage" to "T12_PLAYING_CONFIRMED",
+                "announcementCycleId" to cycleId,
+                "elapsedRealtimeNanos" to event.elapsedRealtimeNanos,
+                "transitionElapsedMs" to activeCycle?.transitionAtElapsedNanos.elapsedMillisUntil(
+                    event.elapsedRealtimeNanos,
+                ),
+                "attempt" to event.attempt,
+                "reason" to event.reason,
+            )
+
+            PlaybackRestoreEventType.PLAY_RETRY_REQUESTED -> TrackTalkDebugLog.event(
+                "ANNOUNCEMENT_RESTORE_RETRY",
+                "latencyCycleId" to latencyCycleId,
+                "announcementCycleId" to cycleId,
+                "elapsedRealtimeNanos" to event.elapsedRealtimeNanos,
+                "attempt" to event.attempt,
+                "reason" to event.reason,
+            )
+
+            PlaybackRestoreEventType.WAITING_FOR_SESSION,
+            PlaybackRestoreEventType.CANCELLED,
+            PlaybackRestoreEventType.FAILED,
+            -> Unit
+        }
         logRestoreCycle(
             cycleId = cycleId,
             stage = event.type.name,
@@ -885,6 +975,7 @@ class TrackVoiceController(
 
     private fun completePlaybackRestore(cycleId: Long, reason: String) {
         val cycle = playbackRestoreObligation.complete(cycleId) ?: return
+        latencyCycleByRestoreCycleId.remove(cycleId)
         playbackRestoreWatchdogJob?.cancel()
         playbackRestoreWatchdogJob = null
         val terminalStage = when {
@@ -904,6 +995,7 @@ class TrackVoiceController(
     private fun cancelPlaybackRestoreWithoutResume(reason: String) {
         val cycle = playbackRestoreObligation.activeCycle() ?: return
         playbackRestoreObligation.cancel(cycle.id)
+        latencyCycleByRestoreCycleId.remove(cycle.id)
         playbackRestoreWatchdogJob?.cancel()
         playbackRestoreWatchdogJob = null
         monitor?.cancelPendingResume(reason)
@@ -954,7 +1046,22 @@ class TrackVoiceController(
         )
     }
 
+    private fun scheduleBoundaryIdentityConfirmation() {
+        if (boundaryIdentityConfirmationJob?.isActive == true) return
+        boundaryIdentityConfirmationJob = scope.launch {
+            delay(BOUNDARY_IDENTITY_CONFIRMATION_MS)
+            boundaryIdentityConfirmationJob = null
+            monitor?.refresh()
+        }
+    }
+
+    private fun cancelBoundaryIdentityConfirmation() {
+        boundaryIdentityConfirmationJob?.cancel()
+        boundaryIdentityConfirmationJob = null
+    }
+
     private fun processMediaUpdate(update: MediaMonitorUpdate) {
+        val processingStartedAtElapsedNanos = SystemClock.elapsedRealtimeNanos()
         var event = update.selected?.event?.let(::applyExternalMetadataOverride)
         val settings = effectiveSettings()
         val incomingSessionKey = update.selected?.sessionKey
@@ -977,12 +1084,58 @@ class TrackVoiceController(
         var transitionObservation: TransitionObservation? = null
         var prefetchedAnnouncementText: String? = null
         var prefetchedVoicePlan: PreparedTtsVoicePlan? = null
-        val resumedAfterHardPlaybackBoundary = hardPlaybackBoundaryPending && (
+        val resumedAfterHardPlaybackBoundaryBase = hardPlaybackBoundaryPending && (
             hardPlaybackBoundaryAllowsSameSession ||
                 hardPlaybackBoundarySessionKey == null ||
                 incomingSessionKey == null ||
                 incomingSessionKey != hardPlaybackBoundarySessionKey
             )
+        val sameTrackAsAcceptedAtBoundary = lastAnnouncedTrack?.let { accepted ->
+            event?.let { current ->
+                AnnouncementTrackMatcher.matchesForDuplicateSuppression(
+                    expected = accepted,
+                    current = current,
+                    requireSameSource = true,
+                )
+            }
+        } == true
+        val boundaryIdentityDecision = if (event != null && resumedAfterHardPlaybackBoundaryBase) {
+            boundaryIdentityCoherenceGuard.evaluate(
+                hardBoundaryPending = hardPlaybackBoundaryPending,
+                sameSessionRestartAllowed = hardPlaybackBoundaryAllowsSameSession,
+                sameTrackAsAccepted = sameTrackAsAcceptedAtBoundary,
+                currentPositionMs = event.playbackPosition,
+                boundaryKey = listOf(
+                    incomingSessionKey.orEmpty(),
+                    event.logicalIdentity(),
+                    preparedNextTrack?.predicted?.mediaId.orEmpty(),
+                    preparedNextTrack?.predicted?.queueItemId?.toString().orEmpty(),
+                ).joinToString("|"),
+                observedAtElapsedNanos = update.observedAtElapsedNanos
+                    .takeIf { it > 0L }
+                    ?: SystemClock.elapsedRealtimeNanos(),
+            )
+        } else {
+            boundaryIdentityCoherenceGuard.reset()
+            BoundaryIdentityDecision.NOT_APPLICABLE
+        }
+        if (boundaryIdentityDecision == BoundaryIdentityDecision.DEFER_STALE_PREVIOUS) {
+            scheduleBoundaryIdentityConfirmation()
+            TrackTalkDebugLog.event(
+                "BOUNDARY_IDENTITY_DEFERRED",
+                "eventSequenceNumber" to update.eventSequenceNumber,
+                "sessionKey" to incomingSessionKey,
+                "source" to event?.sourcePackageName,
+                "mediaId" to event?.mediaId,
+                "title" to event?.title,
+                "positionMs" to event?.playbackPosition,
+                "reason" to "POSITION_RESET_WITH_STALE_PREVIOUS_METADATA",
+            )
+        } else if (boundaryIdentityDecision == BoundaryIdentityDecision.CONFIRMED_SAME_TRACK_RESTART) {
+            cancelBoundaryIdentityConfirmation()
+        }
+        val resumedAfterHardPlaybackBoundary = resumedAfterHardPlaybackBoundaryBase &&
+            boundaryIdentityDecision != BoundaryIdentityDecision.DEFER_STALE_PREVIOUS
         val actualTrackChange = previousEvent != null && event != null &&
             !AnnouncementTrackMatcher.matchesForDuplicateSuppression(
                 expected = previousEvent,
@@ -990,6 +1143,8 @@ class TrackVoiceController(
                 requireSameSource = true,
             )
         if (actualTrackChange) {
+            boundaryIdentityCoherenceGuard.reset()
+            cancelBoundaryIdentityConfirmation()
             // A confirmed replacement track is newer user/provider intent.
             // Never let an old announcement cycle issue PLAY for its stale
             // TrackTalk-owned pause after this boundary.
@@ -998,8 +1153,10 @@ class TrackVoiceController(
             val actualTrackChangeAtElapsedNanos = update.observedAtElapsedNanos
                 .takeIf { it > 0L }
                 ?: SystemClock.elapsedRealtimeNanos()
+            val latencyCycleId = "m${monitorGeneration}-e${update.eventSequenceNumber}"
             lastActualTrackChangeAtMs = actualTrackChangeAtMs
             lastActualTrackChangeAtElapsedNanos = actualTrackChangeAtElapsedNanos
+            lastActualTrackChangeLatencyCycleId = latencyCycleId
             pausedObservedForTransitionAtElapsedNanos = null
             val prepared = preparedNextTrack
             var prefetchMatched = false
@@ -1023,8 +1180,10 @@ class TrackVoiceController(
             val identityResolvedAtNanos = SystemClock.elapsedRealtimeNanos()
             lastActualTrackChangeUsedPrefetch = prefetchMatched
             transitionObservation = TransitionObservation(
+                latencyCycleId = latencyCycleId,
                 transitionAtMs = actualTrackChangeAtMs,
                 transitionAtElapsedNanos = actualTrackChangeAtElapsedNanos,
+                processingStartedAtElapsedNanos = processingStartedAtElapsedNanos,
                 identityResolvedAtElapsedNanos = identityResolvedAtNanos,
                 eventSequenceNumber = update.eventSequenceNumber,
                 eventType = update.eventType,
@@ -1218,43 +1377,57 @@ class TrackVoiceController(
             )
         }
         playbackRestoreObligation.activeCycle()?.let { cycle ->
-            if (
-                event.isPlaying &&
-                playbackRestoreObligation.matchesActiveTrack(event) &&
-                playbackRestoreObligation.markPlayerPlayingAfterOwnedPause(
-                    cycle.id,
-                    SystemClock.elapsedRealtimeNanos(),
-                )
-            ) {
-                logRestoreCycle(
+            if (playbackRestoreObligation.matchesActiveTrack(event)) {
+                val observedAtNanos = update.observedAtElapsedNanos
+                    .takeIf { it > 0L }
+                    ?: SystemClock.elapsedRealtimeNanos()
+                val stateUpdatedAtNanos = event.playbackStateUpdateElapsedMs
+                    ?.takeIf { it > 0L }
+                    ?.times(1_000_000L)
+                when (playbackRestoreObligation.observePlayerState(
                     cycleId = cycle.id,
-                    stage = "PLAYER_PLAYING_DURING_TTS",
-                    event = event,
-                    reason = "INTERVENING_PLAYBACK_INTENT",
-                )
+                    playbackStatus = event.playbackState,
+                    observedAtElapsedNanos = observedAtNanos,
+                    stateUpdatedAtElapsedNanos = stateUpdatedAtNanos,
+                )) {
+                    PlaybackRestorePlayerObservation.OWNED_PAUSE_CONFIRMED -> logRestoreCycle(
+                        cycleId = cycle.id,
+                        stage = "PLAYER_PAUSED_OBSERVED",
+                        event = event,
+                        elapsedRealtimeNanos = observedAtNanos,
+                        reason = "OWNED_PAUSE_CONFIRMED;stateUpdatedAt=$stateUpdatedAtNanos",
+                    )
+
+                    PlaybackRestorePlayerObservation.INTERVENING_PLAYBACK -> logRestoreCycle(
+                        cycleId = cycle.id,
+                        stage = "PLAYER_PLAYING_DURING_TTS",
+                        event = event,
+                        elapsedRealtimeNanos = observedAtNanos,
+                        reason = "INTERVENING_PLAYBACK_INTENT;stateUpdatedAt=$stateUpdatedAtNanos",
+                    )
+
+                    PlaybackRestorePlayerObservation.NEWER_PAUSE_OR_STOP_INTENT -> {
+                        val reason = playbackRestoreObligation.newerPlaybackIntentReason(cycle.id)
+                            ?: "NEWER_PAUSE_OR_STOP"
+                        logRestoreCycle(
+                            cycleId = cycle.id,
+                            stage = "NEWER_PLAYBACK_INTENT",
+                            event = event,
+                            elapsedRealtimeNanos = observedAtNanos,
+                            reason = "$reason;stateUpdatedAt=$stateUpdatedAtNanos",
+                        )
+                        cancelPlaybackRestoreWithoutResume("NEWER_PLAYBACK_INTENT_$reason")
+                    }
+
+                    PlaybackRestorePlayerObservation.DUPLICATE_OR_STALE,
+                    PlaybackRestorePlayerObservation.IGNORED,
+                    -> Unit
+                }
             }
         }
         val newPlaybackOccurrence = actualTrackChange || resumedAfterHardPlaybackBoundary
         if (!event.isPlaying) {
             refreshPreparedNextTrack(event, incomingSessionKey)
-            val restoreCycle = playbackRestoreObligation.activeCycle()
-            if (
-                event.playbackState == PlaybackStatus.PAUSED &&
-                restoreCycle != null &&
-                playbackRestoreObligation.matchesActiveTrack(event)
-            ) {
-                val pausedObservedAtNanos = SystemClock.elapsedRealtimeNanos()
-                if (playbackRestoreObligation.hasInterveningPlaybackIntent(restoreCycle.id)) {
-                    cancelPlaybackRestoreWithoutResume("USER_PAUSED_AFTER_INTERVENING_PLAYBACK")
-                } else if (playbackRestoreObligation.markPlayerPaused(restoreCycle.id, pausedObservedAtNanos)) {
-                    logRestoreCycle(
-                        cycleId = restoreCycle.id,
-                        stage = "PLAYER_PAUSED_OBSERVED",
-                        event = event,
-                        elapsedRealtimeNanos = pausedObservedAtNanos,
-                    )
-                }
-            }
             // A media session commonly reports PAUSED while audio focus is
             // moving to TTS. Once preparation or speech has been committed,
             // keep that batch alive; otherwise a real user pause still cancels
@@ -1306,6 +1479,8 @@ class TrackVoiceController(
             isNewRepeatCycle = newRepeatOneCycle,
             eventSequenceNumber = update.eventSequenceNumber,
             logicalSessionGeneration = logicalSessionGeneration,
+            latencyCycleId = transitionObservation?.latencyCycleId
+                ?: lastActualTrackChangeLatencyCycleId,
             preparedText = prefetchedAnnouncementText,
             preparedVoicePlan = prefetchedVoicePlan,
         )
@@ -1323,6 +1498,26 @@ class TrackVoiceController(
         observation ?: return
         val current = observation.currentEvent
         val previous = observation.previousEvent
+        TrackTalkDebugLog.event(
+            "ANNOUNCEMENT_LATENCY",
+            "latencyCycleId" to observation.latencyCycleId,
+            "stage" to "T0_FIRST_VISIBLE_NEW_TRACK_SIGNAL",
+            "elapsedRealtimeNanos" to observation.transitionAtElapsedNanos,
+            "eventSequenceNumber" to observation.eventSequenceNumber,
+            "eventType" to observation.eventType,
+            "mediaId" to current.mediaId,
+        )
+        TrackTalkDebugLog.event(
+            "ANNOUNCEMENT_WAIT",
+            "latencyCycleId" to observation.latencyCycleId,
+            "waitClass" to "MEDIA_EVENT_QUEUE",
+            "deliberate" to false,
+            "plannedMs" to 0,
+            "actualMs" to observation.transitionAtElapsedNanos.elapsedMillisUntil(
+                observation.processingStartedAtElapsedNanos,
+            ),
+            "stage" to "COMPLETED",
+        )
         TrackTalkDebugLog.event(
             "TRANSITION_TIMING",
             "stage" to "T0_TRANSITION_CONFIRMED",
@@ -1356,6 +1551,18 @@ class TrackVoiceController(
                 "transitionToMergeMs" to observation.transitionAtMs - prepared.preparedAt,
             )
         }
+        TrackTalkDebugLog.event(
+            "ANNOUNCEMENT_LATENCY",
+            "latencyCycleId" to observation.latencyCycleId,
+            "stage" to "T1_LOGICAL_TRACK_ACCEPTED",
+            "elapsedRealtimeNanos" to observation.identityResolvedAtElapsedNanos,
+            "transitionElapsedMs" to observation.transitionAtElapsedNanos.elapsedMillisUntil(
+                observation.identityResolvedAtElapsedNanos,
+            ),
+            "prefetched" to (observation.matchedPrefetch != null),
+            "eventSequenceNumber" to observation.eventSequenceNumber,
+            "mediaId" to current.mediaId,
+        )
         TrackTalkDebugLog.event(
             "TRANSITION_TIMING",
             "stage" to "T1_IDENTITY_RESOLVED",
@@ -1453,6 +1660,7 @@ class TrackVoiceController(
         isNewRepeatCycle: Boolean,
         eventSequenceNumber: Long = 0L,
         logicalSessionGeneration: Long = 0L,
+        latencyCycleId: String? = lastActualTrackChangeLatencyCycleId,
         routeRetryAttempt: Int = 0,
         routeResolutionOverride: AudioRouteResolution? = null,
         preparedText: String? = null,
@@ -1616,6 +1824,20 @@ class TrackVoiceController(
             return
         }
 
+        val policyResolvedAtNanos = SystemClock.elapsedRealtimeNanos()
+        TrackTalkDebugLog.event(
+            "ANNOUNCEMENT_LATENCY",
+            "latencyCycleId" to latencyCycleId,
+            "stage" to "T2_POLICY_DUPLICATE_DECISION_COMPLETED",
+            "elapsedRealtimeNanos" to policyResolvedAtNanos,
+            "transitionElapsedMs" to lastActualTrackChangeAtElapsedNanos.elapsedMillisUntil(
+                policyResolvedAtNanos,
+            ),
+            "shouldAnnounce" to true,
+            "eventSequenceNumber" to eventSequenceNumber,
+            "mediaId" to event.mediaId,
+        )
+
         if (routeResolution.isTransitioning && !settings.outputPolicy.allows(externalAudioOutput = false)) {
             deferAnnouncementForRouteResolution(
                 event = event,
@@ -1626,17 +1848,34 @@ class TrackVoiceController(
                 isNewRepeatCycle = isNewRepeatCycle,
                 eventSequenceNumber = eventSequenceNumber,
                 logicalSessionGeneration = logicalSessionGeneration,
+                latencyCycleId = latencyCycleId,
                 routeRetryAttempt = routeRetryAttempt,
                 routeResolution = routeResolution,
             )
             return
         }
 
+        val routeResolvedAtNanos = SystemClock.elapsedRealtimeNanos()
+        TrackTalkDebugLog.event(
+            "ANNOUNCEMENT_LATENCY",
+            "latencyCycleId" to latencyCycleId,
+            "stage" to "T3_ROUTE_RESOLUTION_COMPLETED",
+            "elapsedRealtimeNanos" to routeResolvedAtNanos,
+            "transitionElapsedMs" to lastActualTrackChangeAtElapsedNanos.elapsedMillisUntil(
+                routeResolvedAtNanos,
+            ),
+            "routeResolution" to routeResolution.state,
+            "routeReason" to routeResolution.reason,
+            "routeRetryAttempt" to routeRetryAttempt,
+            "mediaId" to event.mediaId,
+        )
+
         val transitionAtElapsedNanos = lastActualTrackChangeAtElapsedNanos
         val eligibilityResolvedAtNanos = SystemClock.elapsedRealtimeNanos()
         cancelPendingAnnouncement()
         pendingAnnouncementEvent = event
         val pendingToken = ++pendingAnnouncementToken
+        val announcementTraceId = latencyCycleId ?: "m${monitorGeneration}-a$pendingToken"
         val metadataSettlementDelay = when {
             decision.formatOptions.readTrackNumber && AlbumTrackNumberResolver.resolve(event) == null ->
                 EXTERNAL_METADATA_SETTLE_DELAY_MS
@@ -1648,6 +1887,16 @@ class TrackVoiceController(
             scheduledDelayMs = scheduledDelayMs,
             decisionDelayMs = decision.delayMs,
         )
+        TrackTalkDebugLog.event(
+            "ANNOUNCEMENT_WAIT_PLAN",
+            "latencyCycleId" to announcementTraceId,
+            "configuredDelayMs" to decision.delayMs,
+            "metadataSettlementDelayMs" to metadataSettlementDelay,
+            "effectiveScheduledDelayMs" to scheduledDelayMs,
+            "preAudioProtectionDelayMs" to preparationDelayMs,
+            "postAudioProtectionDelayMs" to (scheduledDelayMs - preparationDelayMs),
+            "routeRecheckDelayMs" to 0,
+        )
         pendingFingerprints += fingerprint
         if (preparationDelayMs == 0L) {
             // Immediate mode has already passed route, entitlement, duplicate,
@@ -1655,7 +1904,14 @@ class TrackVoiceController(
             // its resulting callback cannot cancel this announcement, then
             // request audio protection without another coroutine dispatch.
             preparedAnnouncement = PreparedAnnouncement(fingerprint, pendingToken)
-            if (!prepareAnnouncementAudio(settings, event, sessionKey, transitionAtElapsedNanos)) {
+            if (!prepareAnnouncementAudio(
+                    settings,
+                    event,
+                    sessionKey,
+                    transitionAtElapsedNanos,
+                    announcementTraceId,
+                )
+            ) {
                 if (preparedAnnouncement?.fingerprint == fingerprint) releasePreparedAnnouncement()
                 pendingFingerprints -= fingerprint
                 if (pendingAnnouncementToken == pendingToken) pendingAnnouncementEvent = null
@@ -1709,7 +1965,12 @@ class TrackVoiceController(
         )
         pendingJob = scope.launch {
             try {
-                if (preparationDelayMs > 0L) delay(preparationDelayMs)
+                traceAnnouncementDelay(
+                    latencyCycleId = announcementTraceId,
+                    waitClass = "PRE_AUDIO_PROTECTION_DELAY",
+                    plannedMs = preparationDelayMs,
+                    transitionAtElapsedNanos = transitionAtElapsedNanos,
+                )
                 if (!isPendingAnnouncement(pendingToken, fingerprint)) return@launch
                 if (preparedAnnouncement == null) {
                     // Mark the batch before requesting audio focus or pausing
@@ -1717,7 +1978,14 @@ class TrackVoiceController(
                     // produce a PAUSED callback; without this marker that
                     // callback cancels the very job that caused it.
                     preparedAnnouncement = PreparedAnnouncement(fingerprint, pendingToken)
-                    if (!prepareAnnouncementAudio(settings, event, sessionKey, transitionAtElapsedNanos)) {
+                    if (!prepareAnnouncementAudio(
+                            settings,
+                            event,
+                            sessionKey,
+                            transitionAtElapsedNanos,
+                            announcementTraceId,
+                        )
+                    ) {
                         if (preparedAnnouncement?.fingerprint == fingerprint) {
                             releasePreparedAnnouncement()
                         }
@@ -1729,7 +1997,12 @@ class TrackVoiceController(
                     }
                 }
                 val remainingDelayMs = scheduledDelayMs - preparationDelayMs
-                if (remainingDelayMs > 0L) delay(remainingDelayMs)
+                traceAnnouncementDelay(
+                    latencyCycleId = announcementTraceId,
+                    waitClass = "POST_AUDIO_PROTECTION_DELAY",
+                    plannedMs = remainingDelayMs,
+                    transitionAtElapsedNanos = transitionAtElapsedNanos,
+                )
                 if (!isPendingAnnouncement(pendingToken, fingerprint)) return@launch
                 val current = _mediaState.value.currentEvent
                 val currentMatches = current != null && AnnouncementTrackMatcher.matches(event, current)
@@ -1750,6 +2023,8 @@ class TrackVoiceController(
                     event = currentEvent,
                     pendingToken = pendingToken,
                     fingerprint = fingerprint,
+                    latencyCycleId = announcementTraceId,
+                    transitionAtElapsedNanos = transitionAtElapsedNanos,
                 ) ?: return@launch
                 val finalEvent = _mediaState.value.currentEvent
                 if (!isRouteRetryStillCurrent(currentEvent, finalEvent)) return@launch
@@ -1776,42 +2051,40 @@ class TrackVoiceController(
                 )
                 if (!currentDecision.shouldAnnounce || currentDecision.text == null) return@launch
 
+                val preparationReadyAtNanos = SystemClock.elapsedRealtimeNanos()
+                TrackTalkDebugLog.event(
+                    "ANNOUNCEMENT_LATENCY",
+                    "latencyCycleId" to announcementTraceId,
+                    "stage" to "T5_ANNOUNCEMENT_PREPARATION_READY",
+                    "elapsedRealtimeNanos" to preparationReadyAtNanos,
+                    "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(
+                        preparationReadyAtNanos,
+                    ),
+                    "preparedTextReused" to (preparedText != null),
+                    "preparedVoicePlanReused" to (preparedVoicePlan != null),
+                    "textLength" to currentDecision.text.length,
+                    "mediaId" to eventForSpeech.mediaId,
+                )
+
                 logAnnouncementComponents(
                     event = eventForSpeech,
                     decision = currentDecision,
                     action = "FINAL",
                 )
 
-                val announcedAt = System.currentTimeMillis()
-                lastAnnouncedTrack = eventForSpeech
-                lastAnnouncedAt = announcedAt
-                lastAnnouncedSessionKey = sessionKey
-                hardPlaybackBoundaryPending = false
-                hardPlaybackBoundarySessionKey = null
-                hardPlaybackBoundaryAllowsSameSession = false
-                duplicateSuppressor.markAnnounced(
+                val announcedAt = markAutomaticAnnouncementAccepted(
                     event = eventForSpeech,
-                    now = announcedAt,
-                    announcementText = currentDecision.text,
+                    text = currentDecision.text,
+                    sessionKey = sessionKey,
+                    eventSequenceNumber = eventSequenceNumber,
+                    sessionGeneration = logicalSessionGeneration,
+                    stage = "ACCEPTED",
                 )
-                TrackTalkDebugLog.event(
-                    "DUPLICATE_STATE_WRITE",
-                    "stage" to "ACCEPTED",
-                    "historyPresent" to true,
-                    "logicalTrack" to eventForSpeech.logicalIdentity(),
-                    "announcedAt" to announcedAt,
-                    "eventSequenceNumber" to eventSequenceNumber,
-                    "logicalSessionGeneration" to logicalSessionGeneration,
-                )
-                persistenceScope.launch {
-                    persistenceMutex.withLock {
-                        repository.savePersistedAnnouncement(eventForSpeech.toPersistedAnnouncement(announcedAt))
-                    }
-                }
                 val transitionAtMs = lastActualTrackChangeAtMs
                 val ttsRequestedAtNanos = SystemClock.elapsedRealtimeNanos()
                 TrackTalkDebugLog.event(
                     "TTS_REQUESTED",
+                    "latencyCycleId" to announcementTraceId,
                     "mediaId" to eventForSpeech.mediaId,
                     "title" to eventForSpeech.title,
                     "artist" to eventForSpeech.artist,
@@ -1834,10 +2107,14 @@ class TrackVoiceController(
                     transitionAtMs,
                     transitionAtElapsedNanos,
                     preparedVoicePlan,
+                    announcementTraceId,
                 )
                 if (transitionAtMs != null) lastActualTrackChangeAtMs = null
                 if (transitionAtElapsedNanos != null) {
                     lastActualTrackChangeAtElapsedNanos = null
+                    if (lastActualTrackChangeLatencyCycleId == latencyCycleId) {
+                        lastActualTrackChangeLatencyCycleId = null
+                    }
                     lastActualTrackChangeUsedPrefetch = false
                 }
             } finally {
@@ -1850,6 +2127,45 @@ class TrackVoiceController(
                 }
             }
         }
+    }
+
+    private fun markAutomaticAnnouncementAccepted(
+        event: PlaybackEvent,
+        text: String,
+        sessionKey: String?,
+        eventSequenceNumber: Long,
+        sessionGeneration: Long,
+        stage: String,
+    ): Long {
+        val announcedAt = System.currentTimeMillis()
+        lastAnnouncedTrack = event
+        lastAnnouncedAt = announcedAt
+        lastAnnouncedSessionKey = sessionKey
+        hardPlaybackBoundaryPending = false
+        hardPlaybackBoundarySessionKey = null
+        hardPlaybackBoundaryAllowsSameSession = false
+        boundaryIdentityCoherenceGuard.reset()
+        cancelBoundaryIdentityConfirmation()
+        duplicateSuppressor.markAnnounced(
+            event = event,
+            now = announcedAt,
+            announcementText = text,
+        )
+        TrackTalkDebugLog.event(
+            "DUPLICATE_STATE_WRITE",
+            "stage" to stage,
+            "historyPresent" to true,
+            "logicalTrack" to event.logicalIdentity(),
+            "announcedAt" to announcedAt,
+            "eventSequenceNumber" to eventSequenceNumber,
+            "logicalSessionGeneration" to sessionGeneration,
+        )
+        persistenceScope.launch {
+            persistenceMutex.withLock {
+                repository.savePersistedAnnouncement(event.toPersistedAnnouncement(announcedAt))
+            }
+        }
+        return announcedAt
     }
 
     /**
@@ -1867,6 +2183,7 @@ class TrackVoiceController(
         isNewRepeatCycle: Boolean,
         eventSequenceNumber: Long,
         logicalSessionGeneration: Long,
+        latencyCycleId: String?,
         routeRetryAttempt: Int,
         routeResolution: AudioRouteResolution,
     ) {
@@ -1877,6 +2194,7 @@ class TrackVoiceController(
         pendingFingerprints += fingerprint
         TrackTalkDebugLog.event(
             "ROUTE_RESOLUTION_DEFERRED",
+            "latencyCycleId" to latencyCycleId,
             "mediaId" to event.mediaId,
             "title" to event.title,
             "resolution" to routeResolution.state,
@@ -1887,7 +2205,12 @@ class TrackVoiceController(
         )
         pendingJob = scope.launch {
             try {
-                delay(ROUTE_CONFLICT_RECHECK_DELAY_MS)
+                traceAnnouncementDelay(
+                    latencyCycleId = latencyCycleId,
+                    waitClass = "ROUTE_RECHECK",
+                    plannedMs = ROUTE_CONFLICT_RECHECK_DELAY_MS,
+                    transitionAtElapsedNanos = lastActualTrackChangeAtElapsedNanos,
+                )
                 if (!isPendingAnnouncement(pendingToken, fingerprint)) return@launch
 
                 val pendingEvent = pendingAnnouncementEvent ?: event
@@ -1909,6 +2232,7 @@ class TrackVoiceController(
                 val retryResolution = outputDetector.resolveRoute(retryAttempt)
                 TrackTalkDebugLog.event(
                     "ROUTE_RESOLUTION_RECHECK",
+                    "latencyCycleId" to latencyCycleId,
                     "mediaId" to retryEvent.mediaId,
                     "title" to retryEvent.title,
                     "resolution" to retryResolution.state,
@@ -1929,6 +2253,7 @@ class TrackVoiceController(
                     isNewRepeatCycle = isNewRepeatCycle,
                     eventSequenceNumber = eventSequenceNumber,
                     logicalSessionGeneration = logicalSessionGeneration,
+                    latencyCycleId = latencyCycleId,
                     routeRetryAttempt = retryAttempt,
                     routeResolutionOverride = retryResolution,
                 )
@@ -1963,6 +2288,8 @@ class TrackVoiceController(
         event: PlaybackEvent,
         pendingToken: Long,
         fingerprint: String,
+        latencyCycleId: String?,
+        transitionAtElapsedNanos: Long?,
     ): AudioRouteResolution? {
         val initialResolution = outputDetector.resolveRoute()
         if (
@@ -1974,6 +2301,7 @@ class TrackVoiceController(
 
         TrackTalkDebugLog.event(
             "ROUTE_RESOLUTION_DEFERRED",
+            "latencyCycleId" to latencyCycleId,
             "stage" to "FINAL",
             "mediaId" to event.mediaId,
             "resolution" to initialResolution.state,
@@ -1981,7 +2309,12 @@ class TrackVoiceController(
             "retryAttempt" to 0,
             "recheckDelayMs" to ROUTE_CONFLICT_RECHECK_DELAY_MS,
         )
-        delay(ROUTE_CONFLICT_RECHECK_DELAY_MS)
+        traceAnnouncementDelay(
+            latencyCycleId = latencyCycleId,
+            waitClass = "ROUTE_RECHECK_FINAL",
+            plannedMs = ROUTE_CONFLICT_RECHECK_DELAY_MS,
+            transitionAtElapsedNanos = transitionAtElapsedNanos,
+        )
         if (!isPendingAnnouncement(pendingToken, fingerprint)) return null
 
         val currentEvent = _mediaState.value.currentEvent
@@ -1998,6 +2331,7 @@ class TrackVoiceController(
         val retryResolution = outputDetector.resolveRoute(retryAttempt = 1)
         TrackTalkDebugLog.event(
             "ROUTE_RESOLUTION_RECHECK",
+            "latencyCycleId" to latencyCycleId,
             "stage" to "FINAL",
             "mediaId" to event.mediaId,
             "resolution" to retryResolution.state,
@@ -2216,6 +2550,7 @@ class TrackVoiceController(
         event: PlaybackEvent? = pendingAnnouncementEvent,
         sessionKey: String? = selectedSessionKey,
         transitionAtElapsedNanos: Long? = lastActualTrackChangeAtElapsedNanos,
+        latencyCycleId: String? = lastActualTrackChangeLatencyCycleId,
     ): Boolean {
         val preparationStartedAt = System.currentTimeMillis()
         val plan = AnnouncementPlaybackPlanner.plan(settings)
@@ -2226,9 +2561,27 @@ class TrackVoiceController(
         }
         audioFocusManager.abandon()
         val cycleId = if (plan.pauseBeforeAnnouncement) {
-            armPlaybackRestore(event, sessionKey, transitionAtElapsedNanos)
+            armPlaybackRestore(event, sessionKey, transitionAtElapsedNanos, latencyCycleId)
         } else {
             null
+        }
+        if (!plan.pauseBeforeAnnouncement) {
+            val interventionRequestedAtNanos = SystemClock.elapsedRealtimeNanos()
+            TrackTalkDebugLog.event(
+                "ANNOUNCEMENT_LATENCY",
+                "latencyCycleId" to latencyCycleId,
+                "stage" to "T4_AUDIO_INTERVENTION_REQUESTED",
+                "intervention" to when {
+                    plan.shouldDuckMusic -> "AUDIO_FOCUS_DUCK"
+                    plan.requestAudioFocus -> "AUDIO_FOCUS_TRANSIENT"
+                    else -> "NONE"
+                },
+                "elapsedRealtimeNanos" to interventionRequestedAtNanos,
+                "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(
+                    interventionRequestedAtNanos,
+                ),
+                "mediaId" to event?.mediaId,
+            )
         }
         TrackTalkDebugLog.event(
             "audio_protection",
@@ -2246,7 +2599,12 @@ class TrackVoiceController(
         // even when its session was too transient to return a resume token.
         val shouldRequestAudioFocus = plan.requestAudioFocus &&
             (!plan.pauseBeforeAnnouncement || cycleId != null)
-        if (shouldRequestAudioFocus && !audioFocusManager.request(plan.shouldDuckMusic)) {
+        if (shouldRequestAudioFocus && !audioFocusManager.request(
+                duck = plan.shouldDuckMusic,
+                announcementCycleId = cycleId,
+                latencyCycleId = latencyCycleId,
+            )
+        ) {
             finishAnnouncementAudio(
                 trigger = PlaybackRestoreTrigger.AUDIO_FOCUS_FAILED,
                 cycleId = cycleId,
@@ -2627,8 +2985,10 @@ class TrackVoiceController(
     )
 
     private data class TransitionObservation(
+        val latencyCycleId: String,
         val transitionAtMs: Long,
         val transitionAtElapsedNanos: Long,
+        val processingStartedAtElapsedNanos: Long,
         val identityResolvedAtElapsedNanos: Long,
         val eventSequenceNumber: Long,
         val eventType: MediaEventType,
@@ -2638,6 +2998,39 @@ class TrackVoiceController(
         val matchedPrefetch: PreparedNextTrack?,
     )
 
+    private suspend fun traceAnnouncementDelay(
+        latencyCycleId: String?,
+        waitClass: String,
+        plannedMs: Long,
+        transitionAtElapsedNanos: Long?,
+    ) {
+        if (plannedMs <= 0L) return
+        val startedAtNanos = SystemClock.elapsedRealtimeNanos()
+        TrackTalkDebugLog.event(
+            "ANNOUNCEMENT_WAIT",
+            "latencyCycleId" to latencyCycleId,
+            "waitClass" to waitClass,
+            "deliberate" to true,
+            "plannedMs" to plannedMs,
+            "stage" to "STARTED",
+            "elapsedRealtimeNanos" to startedAtNanos,
+            "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(startedAtNanos),
+        )
+        delay(plannedMs)
+        val completedAtNanos = SystemClock.elapsedRealtimeNanos()
+        TrackTalkDebugLog.event(
+            "ANNOUNCEMENT_WAIT",
+            "latencyCycleId" to latencyCycleId,
+            "waitClass" to waitClass,
+            "deliberate" to true,
+            "plannedMs" to plannedMs,
+            "actualMs" to startedAtNanos.elapsedMillisUntil(completedAtNanos),
+            "stage" to "COMPLETED",
+            "elapsedRealtimeNanos" to completedAtNanos,
+            "transitionElapsedMs" to transitionAtElapsedNanos.elapsedMillisUntil(completedAtNanos),
+        )
+    }
+
     private companion object {
         const val METADATA_SETTLE_DELAY_MS = 250L
         const val EXTERNAL_METADATA_SETTLE_DELAY_MS = 450L
@@ -2645,6 +3038,7 @@ class TrackVoiceController(
         // One bounded retry is enough to distinguish Samsung's transient
         // stale speaker route from a deliberate phone-speaker selection.
         const val ROUTE_CONFLICT_RECHECK_DELAY_MS = 180L
+        const val BOUNDARY_IDENTITY_CONFIRMATION_MS = 650L
     }
 
     private fun effectiveSettings(): UserSettings =

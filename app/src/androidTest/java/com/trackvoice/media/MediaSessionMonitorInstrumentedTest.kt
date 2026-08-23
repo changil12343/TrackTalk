@@ -437,6 +437,49 @@ class MediaSessionMonitorInstrumentedTest {
     }
 
     @Test
+    fun alreadyPlayingAfterAcknowledgedOwnedPauseDoesNotReceiveRedundantPlay() {
+        val restoreEvents = CopyOnWriteArrayList<PlaybackRestoreEvent>()
+        val monitor = MediaSessionMonitor(context) {}
+        monitor.start()
+        try {
+            waitUntil { monitor.isSelectedPlaybackPlaying() == true }
+            val token = monitor.pauseSelectedIfPlaying(announcementCycleId = 75L)
+            assertNotNull(token)
+            waitUntil(timeoutMs = 2_000L) {
+                MediaController(context, session.sessionToken).playbackState?.state == PlaybackState.STATE_PAUSED
+            }
+
+            // Simulate a newer actor (notification/focus owner/player) already
+            // restoring the exact track before TrackTalk reaches TTS completion.
+            setState(PlaybackState.STATE_PLAYING)
+            waitUntil {
+                MediaController(context, session.sessionToken).playbackState?.state == PlaybackState.STATE_PLAYING
+            }
+
+            monitor.resumePlayback(
+                token = token!!,
+                announcementCycleId = 75L,
+                ownedPauseAcknowledged = true,
+                onEvent = { restoreEvents.add(it) },
+            )
+            waitUntil {
+                restoreEvents.any { it.type == PlaybackRestoreEventType.PLAYING_CONFIRMED }
+            }
+
+            assertEquals(0, playCommandCount.get())
+            assertTrue(
+                restoreEvents.any {
+                    it.type == PlaybackRestoreEventType.PLAYING_CONFIRMED &&
+                        it.reason == "ALREADY_PLAYING_AFTER_OWNED_PAUSE" &&
+                        it.attempt == 0
+                },
+            )
+        } finally {
+            monitor.stop()
+        }
+    }
+
+    @Test
     fun manualPauseAfterPlayingConfirmationIsNotOverridden() {
         val monitor = MediaSessionMonitor(context) {}
         monitor.start()
