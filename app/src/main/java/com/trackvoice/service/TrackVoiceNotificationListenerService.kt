@@ -8,27 +8,10 @@ import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import androidx.core.content.ContextCompat
-import androidx.core.app.NotificationCompat
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import com.trackvoice.MainActivity
-import com.trackvoice.R
-import com.trackvoice.data.UserSettings
-import com.trackvoice.localization.localizedString
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.launch
 import com.trackvoice.TrackVoiceApplication
 import com.trackvoice.diagnostics.TrackTalkDebugLog
 
 class TrackVoiceNotificationListenerService : NotificationListenerService() {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var notificationJob: Job? = null
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val controller = application.controller
@@ -60,7 +43,6 @@ class TrackVoiceNotificationListenerService : NotificationListenerService() {
         super.onListenerConnected()
         application.controller.attachNotificationListener()
         application.controller.attachMediaSessionMonitor(this)
-        observeShortcutNotification()
         if (!receiverRegistered) {
             ContextCompat.registerReceiver(
                 this,
@@ -77,73 +59,14 @@ class TrackVoiceNotificationListenerService : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         application.controller.detachNotificationListener(preservePlaybackHistory = true)
-        notificationJob?.cancel()
-        notificationManager.cancel(SHORTCUT_NOTIFICATION_ID)
         unregisterScreenReceiver()
         super.onListenerDisconnected()
     }
 
     override fun onDestroy() {
         application.controller.detachNotificationListener(preservePlaybackHistory = true)
-        notificationJob?.cancel()
-        scope.cancel()
-        notificationManager.cancel(SHORTCUT_NOTIFICATION_ID)
         unregisterScreenReceiver()
         super.onDestroy()
-    }
-
-    private val notificationManager: NotificationManager
-        get() = getSystemService(NotificationManager::class.java)
-
-    private fun observeShortcutNotification() {
-        notificationJob?.cancel()
-        notificationJob = scope.launch {
-            application.repository.userSettings.collectLatest { settings ->
-                createShortcutChannel(settings)
-                if (settings.showStatusNotification) showShortcutNotification(settings)
-                else notificationManager.cancel(SHORTCUT_NOTIFICATION_ID)
-            }
-        }
-    }
-
-    private fun createShortcutChannel(settings: UserSettings) {
-        notificationManager.createNotificationChannel(
-            NotificationChannel(
-                SHORTCUT_CHANNEL_ID,
-                localizedString(settings.appLanguage, R.string.shortcut_channel_name),
-                NotificationManager.IMPORTANCE_LOW,
-            ),
-        )
-    }
-
-    private fun showShortcutNotification(settings: UserSettings) {
-        val intent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = NotificationCompat.Builder(this, SHORTCUT_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_trackvoice)
-            .setContentTitle(
-                localizedString(
-                    settings.appLanguage,
-                    if (settings.enabled) R.string.shortcut_notification_on else R.string.shortcut_notification_off,
-                ),
-            )
-            .setContentText(localizedString(settings.appLanguage, R.string.shortcut_notification_summary))
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
-        notificationManager.notify(SHORTCUT_NOTIFICATION_ID, notification)
-    }
-
-    private companion object {
-        const val SHORTCUT_CHANNEL_ID = "trackvoice_shortcut"
-        const val SHORTCUT_NOTIFICATION_ID = 2101
     }
 
     private fun unregisterScreenReceiver() {

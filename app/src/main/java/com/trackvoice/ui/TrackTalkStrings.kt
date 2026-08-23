@@ -103,9 +103,12 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
         else -> t("ON · 새 곡을 안내합니다.", "ON · Announces new tracks.")
     }
 
-    val notificationPermissionTitle: String get() = t("상단바 바로가기", "Notification shortcut")
+    val notificationPermissionTitle: String get() = t("상단바 상태 알림", "Status notification")
     val notificationPermissionSummary: String
-        get() = t("알림에서 TrackTalk을 바로 켜고 끌 수 있습니다.", "Control TrackTalk directly from the notification.")
+        get() = t(
+            "현재 안내 상태를 확인하고 빠르게 켜거나 끕니다.",
+            "See TrackTalk's current status and quickly turn announcements on or off.",
+        )
     val optionalPermissionBadge: String get() = t("선택", "Optional")
     val allowNotifications: String get() = t("허용", "Allow")
     val musicDetectionPermissionTitle: String get() = t("음악 감지 권한 필요", "Music detection")
@@ -198,8 +201,12 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
             "Bluetooth · wired · USB · HDMI",
         )
     }
-    val statusShortcut: String get() = t("상단바 바로가기", "Notification shortcut")
-    val statusShortcutSummary: String get() = t("알림을 눌러 앱으로 바로 이동합니다.", "Tap the notification to open the app.")
+    val statusShortcut: String get() = t("상단바 상태 알림", "Status notification")
+    val statusShortcutSummary: String
+        get() = t(
+            "현재 안내 상태를 확인하고 빠르게 켜거나 끕니다.",
+            "See TrackTalk's current status and quickly turn announcements on or off.",
+        )
     val connectedDevices: String get() = t("연결 기기", "Connected devices")
     fun audioDeviceType(kind: AudioDeviceKind): String = when (kind) {
         AudioDeviceKind.WIRED_HEADPHONES -> t("유선 이어폰", "Wired headphones")

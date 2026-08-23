@@ -44,6 +44,10 @@
             </intent-filter>
         </service>
 
+        <receiver
+            android:name=".service.TrackVoiceStatusNotificationActionReceiver"
+            android:exported="false" />
+
         <service
             android:name=".quicksettings.TrackVoiceTileService"
             android:exported="true"

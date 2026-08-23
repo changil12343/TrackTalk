@@ -34,7 +34,10 @@ class TrackVoiceViewModel(application: Application) : AndroidViewModel(applicati
             .mapNotNull(ComponentName::unflattenFromString)
             .any { it == component }
         controller.setNotificationAccessGranted(enabled)
+        trackVoiceApplication.statusNotificationManager.refresh()
     }
+
+    fun refreshStatusNotification() = trackVoiceApplication.statusNotificationManager.refresh()
 
     fun refreshBilling() = billingManager.refresh()
 

@@ -50,16 +50,19 @@ class NotificationPermissionBannerTest {
     @Test
     fun bannerCopyIsConciseAndLocalized() {
         val korean = TrackTalkStrings.forLanguage(AppLanguage.KOREAN, "en")
-        assertEquals("상단바 바로가기", korean.notificationPermissionTitle)
-        assertEquals("알림에서 TrackTalk을 바로 켜고 끌 수 있습니다.", korean.notificationPermissionSummary)
+        assertEquals("상단바 상태 알림", korean.notificationPermissionTitle)
+        assertEquals("현재 안내 상태를 확인하고 빠르게 켜거나 끕니다.", korean.notificationPermissionSummary)
         assertEquals("음악 감지 권한 필요", korean.musicDetectionPermissionTitle)
         assertEquals("필수", korean.requiredPermissionBadge)
         assertEquals("선택", korean.optionalPermissionBadge)
         assertEquals("허용", korean.allowNotifications)
 
         val english = TrackTalkStrings.forLanguage(AppLanguage.ENGLISH, "ko")
-        assertEquals("Notification shortcut", english.notificationPermissionTitle)
-        assertEquals("Control TrackTalk directly from the notification.", english.notificationPermissionSummary)
+        assertEquals("Status notification", english.notificationPermissionTitle)
+        assertEquals(
+            "See TrackTalk's current status and quickly turn announcements on or off.",
+            english.notificationPermissionSummary,
+        )
         assertEquals("Music detection", english.musicDetectionPermissionTitle)
         assertEquals("Required", english.requiredPermissionBadge)
         assertEquals("Optional", english.optionalPermissionBadge)

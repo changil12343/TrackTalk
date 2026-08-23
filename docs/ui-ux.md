@@ -47,9 +47,12 @@ There are two intentionally distinct permission concepts:
   observe active media sessions. When absent, Home shows one compact required
   card, hides optional notification prompting and Free Plus promotion, and
   uses an honest playback-empty explanation.
-- **Notification shortcut — Optional.** On Android versions with runtime
-  notification permission, a compact prompt may appear only after the
-  required permission is granted and the shortcut is enabled.
+- **Status notification — Optional.** On Android versions with runtime
+  notification permission, a compact status item may appear when the status
+  notification is enabled. It truthfully surfaces missing music-detection
+  access as a setup state, otherwise summarizes TrackTalk's own effective
+  state and offers one enable/disable action; it never duplicates player
+  metadata or transport controls.
 
 The Home state resolver keeps these cases separate: required missing,
 required granted/optional missing, both granted, required later revoked, and

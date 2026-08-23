@@ -30,7 +30,7 @@ class HomePermissionMatrixInstrumentedTest {
         composeRule.onNodeWithText("음악 감지 권한 필요").assertIsDisplayed()
         composeRule.onNodeWithText("필수").assertIsDisplayed()
         composeRule.onAllNodesWithText("권한 설정").assertCountEquals(1)
-        composeRule.onAllNodesWithText("상단바 바로가기").assertCountEquals(0)
+        composeRule.onAllNodesWithText("상단바 상태 알림").assertCountEquals(0)
         composeRule.onNodeWithText("권한을 설정하면 현재 재생 정보가 표시됩니다.").assertIsDisplayed()
         composeRule.onAllNodesWithText("재생 중인 음악이 없습니다.").assertCountEquals(0)
         composeRule.onAllNodesWithText("TrackTalk Plus").assertCountEquals(0)
@@ -41,7 +41,7 @@ class HomePermissionMatrixInstrumentedTest {
         setHome(requiredGranted = true, notificationGranted = false, premium = false)
 
         composeRule.onAllNodesWithText("음악 감지 권한 필요").assertCountEquals(0)
-        composeRule.onNodeWithText("상단바 바로가기").assertIsDisplayed()
+        composeRule.onNodeWithText("상단바 상태 알림").assertIsDisplayed()
         composeRule.onNodeWithText("선택").assertIsDisplayed()
         composeRule.onNodeWithText("TrackTalk Plus").assertIsDisplayed()
         composeRule.onNodeWithText("재생 중인 음악이 없습니다.").assertIsDisplayed()
@@ -53,7 +53,7 @@ class HomePermissionMatrixInstrumentedTest {
         setHome(requiredGranted = true, notificationGranted = true, premium = true)
 
         composeRule.onAllNodesWithText("음악 감지 권한 필요").assertCountEquals(0)
-        composeRule.onAllNodesWithText("상단바 바로가기").assertCountEquals(0)
+        composeRule.onAllNodesWithText("상단바 상태 알림").assertCountEquals(0)
         composeRule.onAllNodesWithText("TrackTalk Plus").assertCountEquals(0)
         composeRule.onNodeWithText("재생 중인 음악이 없습니다.").assertIsDisplayed()
     }
@@ -63,7 +63,7 @@ class HomePermissionMatrixInstrumentedTest {
         setHome(requiredGranted = true, notificationGranted = false, premium = true)
 
         composeRule.onAllNodesWithText("음악 감지 권한 필요").assertCountEquals(0)
-        composeRule.onNodeWithText("상단바 바로가기").assertIsDisplayed()
+        composeRule.onNodeWithText("상단바 상태 알림").assertIsDisplayed()
         composeRule.onNodeWithText("재생 중인 음악이 없습니다.").assertIsDisplayed()
         composeRule.onAllNodesWithText("권한을 설정하면 현재 재생 정보가 표시됩니다.").assertCountEquals(0)
     }

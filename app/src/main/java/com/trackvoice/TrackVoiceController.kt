@@ -438,6 +438,11 @@ class TrackVoiceController(
     }
 
     fun isPlaybackPlaying(): Boolean? = monitor?.isSelectedPlaybackPlaying()
+    /**
+     * The optional status notification reads the same route resolver used by
+     * announcement policy. It never owns a route or changes playback.
+     */
+    internal fun statusNotificationRoute(): AudioRouteResolution = outputDetector.resolveRoute()
 
     fun setEnabled(enabled: Boolean) {
         scope.launch { repository.setEnabled(enabled) }

@@ -213,7 +213,10 @@ fun TrackVoiceApp(viewModel: TrackVoiceViewModel, activity: Activity) {
     }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { granted -> notificationPermissionGranted = granted }
+    ) { granted ->
+        notificationPermissionGranted = granted
+        viewModel.refreshStatusNotification()
+    }
     val lifecycleOwner = activity as? LifecycleOwner
     DisposableEffect(lifecycleOwner, context) {
         val observer = LifecycleEventObserver { _, event ->
@@ -223,6 +226,7 @@ fun TrackVoiceApp(viewModel: TrackVoiceViewModel, activity: Activity) {
                         context,
                         Manifest.permission.POST_NOTIFICATIONS,
                     ) == PackageManager.PERMISSION_GRANTED
+                viewModel.refreshStatusNotification()
             }
         }
         lifecycleOwner?.lifecycle?.addObserver(observer)

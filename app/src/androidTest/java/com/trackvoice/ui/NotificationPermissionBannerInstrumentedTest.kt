@@ -36,7 +36,7 @@ class NotificationPermissionBannerInstrumentedTest {
             }
         }
 
-        composeRule.onNodeWithText("상단바 바로가기").assertIsDisplayed()
+        composeRule.onNodeWithText("상단바 상태 알림").assertIsDisplayed()
         composeRule.onNodeWithText("허용").assertIsDisplayed().performClick()
         composeRule.runOnIdle { assertEquals(1, requestCount) }
     }
