@@ -2,6 +2,7 @@ package com.trackvoice
 
 import android.app.Application
 import com.trackvoice.data.DataStoreRepository
+import com.trackvoice.diagnostics.TrackTalkDebugLog
 import com.trackvoice.monetization.PlayBillingManager
 import com.trackvoice.service.TrackVoiceStatusNotificationManager
 
@@ -17,6 +18,7 @@ class TrackVoiceApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        TrackTalkDebugLog.event("PROCESS_START")
         repository = DataStoreRepository(this)
         billingManager = PlayBillingManager(this)
         controller = TrackVoiceController(this, repository, billingManager.state)

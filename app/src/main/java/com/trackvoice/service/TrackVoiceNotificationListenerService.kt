@@ -1,6 +1,7 @@
 package com.trackvoice.service
 
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -41,6 +42,9 @@ class TrackVoiceNotificationListenerService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        TrackTalkDebugLog.event("LISTENER_CONNECTED")
+        // The Application/controller is reconstructed before this callback when Android recreates
+        // the process. Re-attaching here deliberately needs no Activity/UI launch.
         application.controller.attachNotificationListener()
         application.controller.attachMediaSessionMonitor(this)
         if (!receiverRegistered) {
@@ -58,12 +62,15 @@ class TrackVoiceNotificationListenerService : NotificationListenerService() {
     }
 
     override fun onListenerDisconnected() {
+        TrackTalkDebugLog.event("LISTENER_DISCONNECTED")
         application.controller.detachNotificationListener(preservePlaybackHistory = true)
         unregisterScreenReceiver()
+        requestListenerRebind()
         super.onListenerDisconnected()
     }
 
     override fun onDestroy() {
+        TrackTalkDebugLog.event("LISTENER_DESTROYED")
         application.controller.detachNotificationListener(preservePlaybackHistory = true)
         unregisterScreenReceiver()
         super.onDestroy()
@@ -73,6 +80,28 @@ class TrackVoiceNotificationListenerService : NotificationListenerService() {
         if (!receiverRegistered) return
         runCatching { unregisterReceiver(screenReceiver) }
         receiverRegistered = false
+    }
+
+    /**
+     * This is Android's documented recovery path after a listener disconnects. It is a single
+     * request to the system, not a foreground service or an app-managed retry loop. If the user
+     * revoked notification access Android will simply keep the listener disconnected.
+     */
+    private fun requestListenerRebind() {
+        try {
+            requestRebind(ComponentName(this, TrackVoiceNotificationListenerService::class.java))
+            TrackTalkDebugLog.event("LISTENER_REBIND_REQUESTED")
+        } catch (failure: SecurityException) {
+            TrackTalkDebugLog.event(
+                "LISTENER_REBIND_FAILED",
+                "failure" to failure.javaClass.simpleName,
+            )
+        } catch (failure: IllegalStateException) {
+            TrackTalkDebugLog.event(
+                "LISTENER_REBIND_FAILED",
+                "failure" to failure.javaClass.simpleName,
+            )
+        }
     }
 
     private fun Bundle?.trackLikeNumericCandidates(): String = this

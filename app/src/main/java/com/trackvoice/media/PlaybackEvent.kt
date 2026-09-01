@@ -47,6 +47,10 @@ data class PlaybackEvent(
     val trackNumberSource: TrackNumberSource = TrackNumberSource.UNSPECIFIED,
     /** Framework MediaController does not expose this reliably; adapters may supply it. */
     val repeatMode: RepeatMode = RepeatMode.UNKNOWN,
+    /** True only when the MediaSession duration key was explicitly present. */
+    val durationMetadataPresent: Boolean = false,
+    /** PlaybackState.playbackSpeed from the current MediaSession snapshot. */
+    val playbackSpeed: Float? = null,
 ) {
     val hasTitle: Boolean get() = !title.isNullOrBlank()
     /**
@@ -422,6 +426,8 @@ data class SessionSnapshot(
     val lastMetadataChangedAt: Long,
     val lastPlaybackStateChangedAt: Long,
     val lastObservedAt: Long,
+    /** In-memory callback generation assigned by [MediaSessionMonitor]. */
+    val controllerGeneration: Long = 0L,
 )
 
 enum class MediaEventType {
@@ -442,9 +448,32 @@ data class MediaMonitorUpdate(
     val eventSequenceNumber: Long = 0L,
     val selectedSessionKey: String? = null,
     val callbackThread: String? = null,
+    /** Lets downstream preparation reject an old controller with the same framework session key. */
+    val selectedControllerGeneration: Long? = null,
 )
 
 object TrackFingerprint {
+    /**
+     * Core identity used by short-lived playback ownership/preparation state.
+     *
+     * Album and other display metadata are deliberately excluded: providers
+     * can carry the previous album for one mixed callback after title/artist
+     * have already advanced, then correct it without changing the track.
+     */
+    fun core(event: PlaybackEvent): String {
+        val mediaId = event.mediaId.normalizedCoreIdentity()
+        return if (mediaId != null) {
+            listOf(event.sourcePackageName, "media-id", mediaId).joinToString("|")
+        } else {
+            listOf(
+                event.sourcePackageName,
+                "metadata",
+                event.title.normalizedCoreIdentity().orEmpty(),
+                event.artist.normalizedCoreIdentity().orEmpty(),
+            ).joinToString("|")
+        }
+    }
+
     /**
      * Full event identity used when the individual metadata fields matter.
      * This is intentionally kept separate from [announcement] because media
@@ -502,4 +531,10 @@ object TrackFingerprint {
         event.playbackState.name,
         event.playbackPosition?.div(1_000L) ?: -1L,
     ).joinToString("|")
+
+    private fun String?.normalizedCoreIdentity(): String? = this
+        ?.trim()
+        ?.lowercase(Locale.ROOT)
+        ?.replace(Regex("\\s+"), " ")
+        ?.takeIf { it.isNotEmpty() }
 }

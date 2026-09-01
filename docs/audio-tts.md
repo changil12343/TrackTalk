@@ -48,9 +48,13 @@ safe code can distinguish an old default from an intentional preference.
 `TtsEngine` normalizes Android utterance outcomes into success (`onDone`),
 error (`onError`), or interruption/cancellation when a request is replaced.
 It reports that result to the controller and never decides independently to
-send `PLAY`. The controller uses the outcome only for an already-owned restore
-cycle; the authoritative token, stale-cycle, user-pause, track-change, retry,
-and watchdog rules are in [Playback semantics](playback-semantics.md).
+send `PLAY`. The controller records a current outcome only for an already-owned,
+memory-only restore lease; completion alone cannot consume it. Automatic
+restore additionally requires a matching post-command pause acknowledgement,
+in either event order. Stale completions are dropped; cancelled work, the
+speech watchdog, and pause-acknowledgement safety expiry invalidate the lease
+without playback. The authoritative identity and user-intent rules are in
+[Playback semantics](playback-semantics.md).
 
 The production baseline is reactive **Fast Pause** after a genuinely confirmed
 current track. It is intentionally not an early predicted pause, rewind, or
@@ -85,6 +89,10 @@ is playing. It reads cache/catalog state only; it must not call `setVoice`,
 `setLanguage`, `speak`, media controls, focus, ducking, or pause. A prepared
 text/voice plan is reusable only after a real next-track match and after normal
 eligibility/policy checks still pass.
+
+Duration pre-arm may invoke this same metadata-only preparation close to an
+estimated end when a safe queue candidate exists. It is not a separate TTS
+entry point and never changes the user's configured announcement delay.
 
 ## Timing rules
 

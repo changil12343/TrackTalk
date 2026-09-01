@@ -2,6 +2,7 @@ package com.trackvoice.announcement
 
 import com.trackvoice.media.PlaybackEvent
 import com.trackvoice.media.PlaybackStatus
+import com.trackvoice.media.QueueItemSnapshot
 import com.trackvoice.media.RepeatMode
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -44,6 +45,48 @@ class DuplicateSuppressorTest {
         assertTrue(suppressor.shouldAnnounce(early, false, 1_000L))
         suppressor.markAnnounced(early, 1_000L)
         assertFalse(suppressor.shouldAnnounce(enriched, false, 2_000L))
+    }
+
+    @Test
+    fun albumOnlyMixedFrameCorrectionDoesNotCreateAnotherAnnouncement() {
+        val suppressor = DuplicateSuppressor()
+        val mixedFrame = event().copy(
+            mediaId = null,
+            title = "So Cruel",
+            artist = "U2",
+            album = "Room On Fire",
+        )
+        val corrected = mixedFrame.copy(album = "Achtung Baby")
+
+        suppressor.markAnnounced(mixedFrame, 1_000L)
+
+        assertTrue(AnnouncementTrackMatcher.matchesForDuplicateSuppression(mixedFrame, corrected))
+        assertFalse(suppressor.shouldAnnounce(corrected, false, 1_400L))
+    }
+
+    @Test
+    fun transientPreviousQueueIdForSameCoreTrackDoesNotCreateAnotherAnnouncement() {
+        val suppressor = DuplicateSuppressor()
+        val queue = listOf(
+            QueueItemSnapshot(null, "Previous", "Other artist", queueItemId = 108L),
+            QueueItemSnapshot(null, "Sulk", "Radiohead", queueItemId = 133L),
+        )
+        val announced = event().copy(
+            mediaId = null,
+            title = "Sulk",
+            artist = "Radiohead",
+            queue = queue,
+            activeQueuePosition = 1,
+        )
+        val transientPreviousQueueProjection = announced.copy(
+            activeQueuePosition = 0,
+            observedAt = 2_000L,
+        )
+
+        suppressor.markAnnounced(announced, 1_000L)
+
+        assertFalse(suppressor.shouldAnnounce(transientPreviousQueueProjection, false, 2_000L))
+        assertFalse(suppressor.shouldAnnounce(announced.copy(observedAt = 2_001L), false, 2_001L))
     }
 
     @Test

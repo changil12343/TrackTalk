@@ -19,6 +19,7 @@ NotificationListenerService
   → MediaSessionMonitor / ActiveSessionSelector
   → TrackMetadataMapper
   → TrackVoiceController serial media-update queue
+  → memory-only duration pre-arm (preparation only)
   → AnnouncementPolicy + AnnouncementFormatter
   → duplicate / pending / route eligibility checks
   → audio preparation + TtsEngine
@@ -41,7 +42,7 @@ not recreate those decisions independently.
 | Metadata mapping | `media/TrackMetadataMapper` | Normalizes metadata, queue descriptions, IDs, durations, and reliable track-number provenance. |
 | Playback semantics | `media/PlaybackEvent`, `TemporalPlaybackContextResolver`, `NextTrackPrefetch` | Represents a snapshot, conservative context evidence, metadata-only preparation. |
 | Announcement decision | `announcement/AnnouncementPolicy`, `AnnouncementFormatter` | Applies settings/eligibility and builds the exact spoken text. |
-| Duplicate/restore state | `DuplicateSuppressor`, `PlaybackRestoreObligation` | Prevents callback churn from speaking twice and restores only owned pauses. |
+| Duplicate/restore state | `DuplicateSuppressor`, `PlaybackRestoreLease`, `PlaybackRestoreObligation` | Prevents callback churn from speaking twice and permits one exact, memory-only owned-pause restore only after independent TTS-terminal and pause-acknowledgement conditions. |
 | Audio/TTS | `TtsEngine`, `AudioFocusManager`, `TrackTalkAudioAttributes` | Selects Android voices, speaks text, and uses semantic focus/attributes. |
 | Route/device model | `AudioOutputDetector`, `AudioDeviceMonitor`, `LogicalAudioDevice` | Separates the active media route from connected-device inventory. |
 | Persistence | `data/DataStoreRepository`, `SettingsModels` | Stores settings, safe migrations, app eligibility, cached metadata, and persisted duplicate state. |
@@ -56,20 +57,33 @@ provided by `PlayBillingManager` and clamped through `forPremiumEntitlement`
 before runtime policy uses settings.
 
 The controller keeps ephemeral state in memory: the selected controller,
-pending token/job, speech generation, prepared next track, audio-route
-snapshot, and active restore cycle. It persists only what must survive process
+pending token/job, speech generation, prepared next track, duration pre-arm
+token/job, audio-route snapshot, and active restore lease. It persists only what must survive process
 recreation, such as the last accepted announcement and metadata cache entries.
 
 ## Lifecycle rules
 
 - `MainActivity.onResume` refreshes notification access and billing UI state.
-- Listener connection attaches the media monitor; disconnection detaches it
-  while preserving duplicate history for a continuing logical playback.
-- Media callbacks are serialized before announcement decisions are made.
+- Listener connection rebuilds the media monitor from persisted settings and
+  current active sessions without requiring an Activity; disconnection detaches
+  it while preserving duplicate history for a continuing logical playback and
+  requests Android's normal listener rebind path.
+- Media callbacks are serialized before announcement decisions are made. Each
+  controller attachment has an in-memory generation, so a late callback from a
+  detached controller cannot mutate the replacement controller's state.
+- A destroyed media session invalidates only its matching controller generation
+  and triggers one active-session reconciliation; it is not treated as a
+  TrackTalk or NotificationListener failure.
 - A session refresh is infrastructure churn, not automatically a new playback
   occurrence.
-- A selected player can vanish after TrackTalk pauses it; the monitor retains
-  the exact accepted controller only for the scoped restore path.
+- A selected player that vanishes, is destroyed, or is replaced after TrackTalk
+  pauses it invalidates the restore lease. Reconnect recovers observation only;
+  it never rediscovers a player for automatic resume.
+- Duration pre-arm is one lightweight, memory-only timer tied to monitor,
+  controller, session, and track identity generations. It may refresh safe
+  metadata/text/voice preparation shortly before an estimated end, but cannot
+  call TTS or control playback; a confirmed current-track event still enters
+  the normal announcement gate.
 
 ## External metadata boundary
 

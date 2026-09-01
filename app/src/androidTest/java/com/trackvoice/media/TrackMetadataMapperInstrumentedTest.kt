@@ -14,6 +14,7 @@ import com.trackvoice.data.AnnouncementReadField
 import com.trackvoice.data.UserSettings
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -83,8 +84,10 @@ class TrackMetadataMapperInstrumentedTest {
         assertEquals(11, event.totalTracks)
         assertEquals(1, event.discNumber)
         assertEquals(180_000L, event.duration)
+        assertTrue(event.durationMetadataPresent)
         assertEquals("track-3", event.mediaId)
         assertEquals(PlaybackStatus.PLAYING, event.playbackState)
+        assertEquals(1f, event.playbackSpeed)
         assertTrue("playing position should not move backwards", event.playbackPosition!! >= 12_345L)
         assertTrue("playing position should remain close to the seeded value", event.playbackPosition!! < 20_000L)
         assertEquals(123L, event.observedAt)
@@ -173,8 +176,30 @@ class TrackMetadataMapperInstrumentedTest {
         assertEquals(null, event.artist)
         assertEquals(null, event.trackNumber)
         assertEquals(null, event.duration)
+        assertFalse(event.durationMetadataPresent)
         assertNotNull(event.queue)
         assertEquals(0, event.queue.size)
+    }
+
+    @Test
+    fun publishedZeroDurationRemainsDistinctFromAMissingDurationKey() {
+        session.setMetadata(
+            MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, "Indefinite stream")
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, 0L)
+                .build(),
+        )
+        session.setPlaybackState(
+            PlaybackState.Builder()
+                .setState(PlaybackState.STATE_PLAYING, 1_000L, 1f)
+                .build(),
+        )
+
+        val event = TrackMetadataMapper { "Test Music" }
+            .map(MediaController(context, session.sessionToken), observedAt = 457L)
+
+        assertTrue(event.durationMetadataPresent)
+        assertEquals(null, event.duration)
     }
 
     @Test

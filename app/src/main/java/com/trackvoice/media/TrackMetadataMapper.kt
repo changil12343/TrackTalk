@@ -18,6 +18,20 @@ class TrackMetadataMapper(
     fun map(controller: MediaController, observedAt: Long = System.currentTimeMillis()): PlaybackEvent {
         val metadata = controller.metadata
         val state = controller.playbackState
+        // `getLong()` returns zero both for a missing key and for a published zero. Keep key
+        // presence separate so duration preparation can safely fall back instead of treating an
+        // absent/indefinite duration as a short track.
+        val durationMetadataPresent = metadata?.containsKey(MediaMetadata.METADATA_KEY_DURATION) == true
+        val rawDuration = metadata
+            ?.takeIf { durationMetadataPresent }
+            ?.let { candidate ->
+                // A third-party session can publish the duration key with an unexpected bundle
+                // type. That is not a reason to lose the entire MediaSession snapshot; keep key
+                // presence and let the duration pre-arm fall back conservatively.
+                runCatching { candidate.getLong(MediaMetadata.METADATA_KEY_DURATION) }.getOrNull()
+            }
+        val duration = rawDuration
+            ?.takeIf { it > 0L }
         val rawQueue = controller.queue.orEmpty()
         val queue = rawQueue.map { it.toSnapshot() }
         val metadataMediaId = metadata?.getString(MediaMetadata.METADATA_KEY_MEDIA_ID).clean()
@@ -84,7 +98,8 @@ class TrackMetadataMapper(
                 "queueSize" to rawQueue.size,
                 "activeQueueItemId" to state?.activeQueueItemId,
                 "activeQueuePosition" to activeQueuePosition,
-                "durationMs" to metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION)?.takeIf { it > 0L },
+                "durationMs" to duration,
+                "durationMetadataPresent" to durationMetadataPresent,
                 "positionMs" to state?.position?.takeIf { it >= 0L },
                 "metadataKeys" to metadata?.keySet()?.joinToString(",", prefix = "[", postfix = "]"),
                 "itemsFromActive" to queueDiagnosticItems,
@@ -250,7 +265,7 @@ class TrackMetadataMapper(
             trackNumber = resolvedTrackNumber,
             totalTracks = metadataTotalTracks,
             discNumber = metadataDiscNumber,
-            duration = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION)?.takeIf { it > 0L },
+            duration = duration,
             mediaId = mediaId,
             playbackState = state.toPlaybackStatus(),
             playbackPosition = state?.position?.takeIf { it >= 0L },
@@ -263,6 +278,8 @@ class TrackMetadataMapper(
             shuffleState = shuffleState,
             trackNumberReliable = trackNumberReliable,
             trackNumberSource = trackNumberSource,
+            durationMetadataPresent = durationMetadataPresent,
+            playbackSpeed = state?.playbackSpeed,
         )
     }
 

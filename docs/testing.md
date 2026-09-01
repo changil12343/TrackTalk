@@ -39,11 +39,35 @@ When changing playback behavior, retain or add coverage for:
 
 - late title/artist enrichment without a second announcement;
 - duplicate callback churn and logical `A → B → A` replay;
+- unrelated notification posted/removed followed by active-session refresh,
+  listener reconnect, or controller replacement while the same core track is
+  playing, all with zero new TTS and zero transport commands;
 - process/session recreation with the same currently playing track;
+- controller replacement with a late stale callback, session destruction or
+  removal, listener reconnect, and monitor restart without any inherited
+  `PLAY` authority or UI launch;
+- album-only mixed-frame correction as enrichment without lease, duplicate,
+  or duration-prediction identity churn; transient previous queue-item IDs with
+  the same core track likewise preserve lease/duplicate/pre-arm state, while a
+  coherent queue plus provider/core replacement invalidates old work;
+- duration pre-arm extrapolation, duration-key absence/invalid fallback,
+  seek/speed/pause invalidation, late stale timer rejection, controller/
+  listener generation replacement, and duplicate metadata without a second
+  preparation or announcement;
 - stale pending/prepared work after quick next/previous or session replacement;
 - direct player track number versus queue index rejection;
 - route transition/retry and external-only policy;
-- owned pause restore, TTS error/cancel paths, and manual user pause;
+- owned pause restore in both event orders (`PAUSED` before TTS and TTS before
+  a delayed `PAUSED`), a provider callback that reuses the pre-command PLAYING
+  timestamp, a new track with no same-track PLAYING callback baseline whose
+  post-command PAUSED source timestamp predates the local pause command,
+  metadata/queue PAUSED remaps that must not acknowledge early,
+  missing/stale pause acknowledgement expiring with zero `PLAY`, user
+  pause/stop, stale TTS completion, process recovery without a lease, exactly
+  one legitimate `PLAY`, and zero retry/resurrection after controller/session/
+  listener invalidation. Device validation waits for the bounded final
+  authoritative state: a stale post-`PLAY` PAUSED callback followed by PLAYING
+  is diagnostic-only, while a genuine final PAUSED state fails restore;
 - immediate policy forcing delay/minimum playback to zero;
 - preserved explicit TTS volume and fresh 80% default;
 - global beta-visible field ordering/toggle/drag behavior.

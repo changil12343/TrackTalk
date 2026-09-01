@@ -2,15 +2,19 @@ package com.trackvoice.media
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSession
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.os.Build
+import android.os.DeadObjectException
 import android.os.Handler
 import android.os.Looper
+import android.os.RemoteException
 import android.os.SystemClock
+import com.trackvoice.announcement.PlaybackRestoreWatchdogPolicy
 import com.trackvoice.diagnostics.TrackTalkDebugLog
 import com.trackvoice.service.TrackVoiceNotificationListenerService
 import java.util.Locale
@@ -21,6 +25,17 @@ class MediaSessionMonitor(
     context: Context,
     private val onUpdate: (MediaMonitorUpdate) -> Unit,
 ) {
+    private var pauseAcknowledgementExpiryMs =
+        PlaybackRestoreWatchdogPolicy.PAUSE_ACKNOWLEDGEMENT_EXPIRY_MS
+
+    internal constructor(
+        context: Context,
+        onUpdate: (MediaMonitorUpdate) -> Unit,
+        pauseAcknowledgementExpiryMs: Long,
+    ) : this(context, onUpdate) {
+        this.pauseAcknowledgementExpiryMs = pauseAcknowledgementExpiryMs
+    }
+
     private val appContext = context.applicationContext
     private val manager = appContext.getSystemService(MediaSessionManager::class.java)
     private val listenerComponent = ComponentName(
@@ -30,11 +45,13 @@ class MediaSessionMonitor(
     private val handler = Handler(Looper.getMainLooper())
     private val mapper = TrackMetadataMapper(::resolveAppName)
     private val sessions = linkedMapOf<String, TrackedSession>()
+    private val controllerGenerations = ControllerGenerationRegistry()
     private var started = false
+    private var sessionRecoveryScheduled = false
+    private var monitorLifecycleGeneration = 0L
     private var selectedSessionKey: String? = null
     private var resumeRequestId = 0L
     private var activeResumeRequest: ActiveResumeRequest? = null
-    private var retainedPausedController: RetainedPausedController? = null
     private var lastPublishedSelection: PublishedSelection? = null
     private var eventSequenceNumber = 0L
 
@@ -42,50 +59,66 @@ class MediaSessionMonitor(
 
     private val activeSessionsListener = MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
         if (!started) return@OnActiveSessionsChangedListener
-        runCatching {
-            updateControllers(controllers.orEmpty())
-            TrackTalkDebugLog.event(
-                "ACTIVE_SESSIONS_CHANGED",
-                "timestamp" to System.currentTimeMillis(),
-                "controllerCount" to controllers.orEmpty().size,
-                "thread" to Thread.currentThread().name,
-            )
-            publish(MediaEventType.ACTIVE_SESSIONS)
-        }
+        val activeControllers = controllers.orEmpty()
+        TrackTalkDebugLog.event(
+            "ACTIVE_SESSIONS_CHANGED",
+            "timestamp" to System.currentTimeMillis(),
+            "controllerCount" to activeControllers.size,
+            "thread" to Thread.currentThread().name,
+        )
+        updateControllers(activeControllers, reason = "ACTIVE_SESSIONS_CHANGED")
+        publish(MediaEventType.ACTIVE_SESSIONS)
     }
 
     fun start() {
         runOnMonitorThread {
             if (started) return@runOnMonitorThread
             started = true
-            runCatching {
+            monitorLifecycleGeneration += 1
+            val listenerRegistered = mediaSessionCall(
+                operation = "ADD_ACTIVE_SESSIONS_LISTENER",
+            ) {
                 manager.addOnActiveSessionsChangedListener(
                     activeSessionsListener,
                     listenerComponent,
                     handler,
                 )
-                updateControllers(manager.getActiveSessions(listenerComponent).orEmpty())
-                publish(MediaEventType.INITIAL)
-            }.onFailure {
+                true
+            } ?: false
+            if (!listenerRegistered) {
                 started = false
                 sessions.clear()
+                controllerGenerations.invalidateAll()
                 selectedSessionKey = null
+                return@runOnMonitorThread
             }
+            refreshControllersFromSystem(reason = "INITIAL_START", recovery = true, eventType = MediaEventType.INITIAL)
         }
     }
 
     fun stop() {
         runOnMonitorThread {
             cancelActiveResume("MONITOR_STOPPED")
-            retainedPausedController = null
             resumeRequestId += 1
-            if (!started) return@runOnMonitorThread
-            started = false
-            runCatching { manager.removeOnActiveSessionsChangedListener(activeSessionsListener) }
-            sessions.values.forEach { tracked ->
-                runCatching { tracked.controller.unregisterCallback(tracked.callback) }
+            if (!started) {
+                monitorLifecycleGeneration += 1
+                controllerGenerations.invalidateAll()
+                return@runOnMonitorThread
             }
-            sessions.clear()
+            started = false
+            monitorLifecycleGeneration += 1
+            sessionRecoveryScheduled = false
+            mediaSessionCall(operation = "REMOVE_ACTIVE_SESSIONS_LISTENER") {
+                manager.removeOnActiveSessionsChangedListener(activeSessionsListener)
+            }
+            sessions.values.toList().forEach { tracked ->
+                detachTrackedSession(
+                    sessionKey = tracked.sessionKey,
+                    generation = tracked.generation,
+                    reason = "MONITOR_STOPPED",
+                )
+            }
+            controllerGenerations.invalidateAll()
             selectedSessionKey = null
         }
     }
@@ -93,10 +126,7 @@ class MediaSessionMonitor(
     fun refresh() {
         runOnMonitorThread {
             if (!started) return@runOnMonitorThread
-            runCatching {
-                updateControllers(manager.getActiveSessions(listenerComponent).orEmpty())
-                publish(MediaEventType.ACTIVE_SESSIONS)
-            }
+            refreshControllersFromSystem(reason = "MANUAL_REFRESH")
         }
     }
 
@@ -107,33 +137,54 @@ class MediaSessionMonitor(
         onPauseRequested: ((elapsedRealtimeNanos: Long) -> Unit)? = null,
     ): PlaybackPauseToken? = runOnMonitorThread {
         // A new announcement owns the pause/resume lifecycle. Do not let a
-        // delayed retry from a previous announcement play the track again.
+        // delayed completion from a previous announcement play the track again.
         cancelActiveResume("NEW_TRACKTALK_PAUSE")
-        retainedPausedController = null
         resumeRequestId += 1
         val tracked = selectedTrackedSession() ?: return@runOnMonitorThread null
         val event = if (expectedEvent != null) {
-            if (!matchesExpectedPlayingTrack(tracked.controller, expectedSessionKey, expectedEvent)) {
+            val expectedTrackMatches = mediaSessionCall(
+                operation = "MATCH_EXPECTED_PLAYING_TRACK",
+                sessionKey = tracked.sessionKey,
+                onFailure = {
+                    invalidateFailedTrackedSession(tracked, "MATCH_EXPECTED_PLAYING_TRACK")
+                },
+            ) {
+                matchesExpectedPlayingTrack(tracked.controller, expectedSessionKey, expectedEvent)
+            }
+            if (expectedTrackMatches != true) {
                 return@runOnMonitorThread null
             }
             expectedEvent
         } else {
-            runCatching { mapper.map(tracked.controller) }.getOrNull()
-                ?: return@runOnMonitorThread null
+            readTrackedEvent(tracked, "MAP_PAUSE_CANDIDATE") ?: return@runOnMonitorThread null
         }
         if (!event.isPlaying || !event.hasTitle) return@runOnMonitorThread null
         val pauseRequestedAtNanos = SystemClock.elapsedRealtimeNanos()
         // Issue the media command before debug logging. The timestamp still
         // marks the request boundary, while Logcat I/O can no longer delay the
         // command that protects the opening of the confirmed track.
-        val paused = runCatching {
+        val paused = mediaSessionCall(
+            operation = "TRANSPORT_PAUSE",
+            sessionKey = tracked.sessionKey,
+            onFailure = {
+                invalidateFailedTrackedSession(tracked, "TRANSPORT_PAUSE")
+            },
+        ) {
             tracked.controller.transportControls.pause()
             true
-        }.getOrDefault(false)
+        } ?: false
         if (paused) {
             // Diagnostics must never turn a successfully issued PAUSE into a
             // missing resume token if a test/listener callback happens to fail.
-            runCatching { onPauseRequested?.invoke(pauseRequestedAtNanos) }
+            try {
+                onPauseRequested?.invoke(pauseRequestedAtNanos)
+            } catch (failure: RuntimeException) {
+                TrackTalkDebugLog.event(
+                    "PAUSE_DIAGNOSTIC_CALLBACK_FAILED",
+                    "announcementCycleId" to announcementCycleId,
+                    "failure" to failure.javaClass.simpleName,
+                )
+            }
             TrackTalkDebugLog.event(
                 "PLAYBACK_PAUSE_REQUESTED",
                 "announcementCycleId" to announcementCycleId,
@@ -143,9 +194,16 @@ class MediaSessionMonitor(
             )
         }
         if (paused) {
+            val pauseCoreFingerprint = TrackFingerprint.core(event)
+            val playingCallbackBaselineElapsedNanos = tracked
+                .lastPlayingCallbackStateUpdatedAtElapsedMs
+                ?.takeIf {
+                    tracked.lastPlayingCallbackCoreFingerprint == pauseCoreFingerprint
+                }
+                ?.times(NANOS_PER_MILLISECOND)
             PlaybackPauseToken(
-                sessionKey = sessionKey(tracked.controller),
-                fingerprint = TrackFingerprint.announcement(event),
+                sessionKey = tracked.sessionKey,
+                fingerprint = pauseCoreFingerprint,
                 sourcePackageName = event.sourcePackageName,
                 mediaId = event.mediaId,
                 title = event.title,
@@ -155,17 +213,11 @@ class MediaSessionMonitor(
                 discNumber = event.discNumber,
                 queueItemId = PlaybackRestoreTrackMatcher.queueItemIdForPause(event),
                 pauseRequestedAtElapsedNanos = pauseRequestedAtNanos,
-            ).also { token ->
-                // Some providers temporarily remove an otherwise valid paused
-                // session from getActiveSessions(). Keep the exact controller
-                // that accepted TrackTalk's PAUSE so restoration does not
-                // depend on the provider publishing a fresh session first.
-                retainedPausedController = RetainedPausedController(
-                    sessionKey = token.sessionKey,
-                    sourcePackageName = token.sourcePackageName,
-                    controller = tracked.controller,
-                )
-            }
+                playbackStateUpdatedAtPauseElapsedNanos = playingCallbackBaselineElapsedNanos,
+                eventSequenceNumberAtPauseCommand = eventSequenceNumber,
+                controllerGeneration = tracked.generation,
+                monitorLifecycleGeneration = monitorLifecycleGeneration,
+            )
         } else {
             null
         }
@@ -180,25 +232,20 @@ class MediaSessionMonitor(
         runOnMonitorThread {
             cancelActiveResume("REPLACED_BY_NEW_RESTORE")
             val requestId = ++resumeRequestId
-            val restoreRequestedAtNanos = SystemClock.elapsedRealtimeNanos()
-            val controller = resolveRestoreSession(token)?.controller
-            val initialState = controller?.playbackState?.state
             val request = ActiveResumeRequest(
                 requestId = requestId,
                 announcementCycleId = announcementCycleId,
                 token = token,
                 callback = onEvent,
-                initialStateWasPlaying = initialState == PlaybackState.STATE_PLAYING,
                 ownedPauseAcknowledged = ownedPauseAcknowledged,
-                sessionRecoveryDeadlineElapsedNanos = restoreRequestedAtNanos +
-                    SESSION_RECOVERY_TIMEOUT_MS * NANOS_PER_MILLISECOND,
             )
             activeResumeRequest = request
-
-            // The first PLAY must be issued before this method returns. A
-            // NotificationListener/controller teardown can stop the monitor on the
-            // same main-loop turn; the former zero-delay Handler post was cancelled
-            // before it ever reached TransportControls.play().
+            TrackTalkDebugLog.event(
+                "PLAYBACK_RESTORE_REQUESTED",
+                "announcementGeneration" to announcementCycleId,
+                "controllerGeneration" to token.controllerGeneration,
+                "reason" to "TTS_TRANSACTION_FINISHED",
+            )
             attemptRestore(request)
         }
     }
@@ -206,7 +253,6 @@ class MediaSessionMonitor(
     fun cancelPendingResume(reason: String) {
         runOnMonitorThread {
             cancelActiveResume(reason)
-            retainedPausedController = null
             resumeRequestId += 1
         }
     }
@@ -215,35 +261,42 @@ class MediaSessionMonitor(
         // A manual tap is an explicit user decision and cancels any automatic
         // resume that may still be queued for an earlier announcement.
         cancelActiveResume("USER_TOGGLE")
-        retainedPausedController = null
         resumeRequestId += 1
         val tracked = selectedTrackedSession() ?: return@runOnMonitorThread null
-        val event = runCatching { mapper.map(tracked.controller) }.getOrNull()
+        val event = readTrackedEvent(tracked, "MAP_USER_TOGGLE_CANDIDATE")
             ?: return@runOnMonitorThread null
         when {
-            event.isPlaying -> runCatching {
+            event.isPlaying -> mediaSessionCall(
+                operation = "TRANSPORT_USER_PAUSE",
+                sessionKey = tracked.sessionKey,
+                onFailure = {
+                    invalidateFailedTrackedSession(tracked, "TRANSPORT_USER_PAUSE")
+                },
+            ) {
+                TrackTalkDebugLog.event(
+                    "USER_PLAYBACK_PAUSE_REQUESTED",
+                    "controllerGeneration" to tracked.generation,
+                    "reason" to "EXPLICIT_USER_TOGGLE",
+                )
                 tracked.controller.transportControls.pause()
                 false
-            }.getOrNull()
+            }
 
-            event.hasTitle -> runCatching {
-                resumePlayback(
-                    PlaybackPauseToken(
-                        sessionKey = sessionKey(tracked.controller),
-                        fingerprint = TrackFingerprint.announcement(event),
-                        sourcePackageName = event.sourcePackageName,
-                        mediaId = event.mediaId,
-                        title = event.title,
-                        artist = event.artist,
-                        album = event.album,
-                        trackNumber = event.trackNumber,
-                        discNumber = event.discNumber,
-                        queueItemId = PlaybackRestoreTrackMatcher.queueItemIdForPause(event),
-                        pauseRequestedAtElapsedNanos = SystemClock.elapsedRealtimeNanos(),
-                    ),
+            event.hasTitle -> mediaSessionCall(
+                operation = "TRANSPORT_USER_PLAY",
+                sessionKey = tracked.sessionKey,
+                onFailure = {
+                    invalidateFailedTrackedSession(tracked, "TRANSPORT_USER_PLAY")
+                },
+            ) {
+                TrackTalkDebugLog.event(
+                    "USER_PLAYBACK_PLAY_REQUESTED",
+                    "controllerGeneration" to tracked.generation,
+                    "reason" to "EXPLICIT_USER_TOGGLE",
                 )
+                tracked.controller.transportControls.play()
                 true
-            }.getOrNull()
+            }
 
             else -> null
         }
@@ -251,96 +304,321 @@ class MediaSessionMonitor(
 
     fun isSelectedPlaybackPlaying(): Boolean? = runOnMonitorThread {
         selectedTrackedSession()?.let {
-            runCatching { mapper.map(it.controller).isPlaying }.getOrNull()
+            readTrackedEvent(it, "MAP_SELECTED_PLAYBACK_STATE")?.isPlaying
         }
     }
 
-    private fun updateControllers(controllers: List<MediaController>) {
-        val nextKeys = controllers.map { sessionKey(it) }.toSet()
-        sessions.keys.toList().filterNot(nextKeys::contains).forEach { key ->
-            sessions.remove(key)?.let { tracked ->
-                TrackTalkDebugLog.event(
-                    "CONTROLLER_UNREGISTERED",
-                    "sessionKey" to key,
-                    "package" to tracked.controller.packageName,
-                    "thread" to Thread.currentThread().name,
-                )
-                runCatching { tracked.controller.unregisterCallback(tracked.callback) }
-            }
+    private fun refreshControllersFromSystem(
+        reason: String,
+        recovery: Boolean = false,
+        eventType: MediaEventType = MediaEventType.ACTIVE_SESSIONS,
+    ) {
+        if (!started) return
+        if (recovery) {
+            TrackTalkDebugLog.event(
+                "SESSION_RECOVERY_STARTED",
+                "reason" to reason,
+                "activeSessionCount" to sessions.size,
+            )
         }
-
-        controllers.forEach { controller ->
-            val key = sessionKey(controller)
-            val existing = sessions[key]
-            if (existing == null) {
-                val sessionCallback = callbackFor(key)
-                runCatching { controller.registerCallback(sessionCallback, handler) }
-                    .onFailure { return@forEach }
-                val now = System.currentTimeMillis()
-                sessions[key] = TrackedSession(controller, sessionCallback, now, now, now)
+        val controllers = mediaSessionCall(operation = "GET_ACTIVE_SESSIONS:$reason") {
+            manager.getActiveSessions(listenerComponent).orEmpty()
+        }
+        if (controllers == null) {
+            if (recovery) {
                 TrackTalkDebugLog.event(
-                    "CONTROLLER_REGISTERED",
-                    "sessionKey" to key,
-                    "package" to controller.packageName,
-                    "controllerToken" to controller.sessionToken.hashCode(),
-                    "thread" to Thread.currentThread().name,
+                    "SESSION_RECOVERY_DONE",
+                    "reason" to reason,
+                    "recovered" to false,
+                    "activeSessionCount" to sessions.size,
                 )
             } else {
-                if (existing.controller !== controller) {
-                    TrackTalkDebugLog.event(
-                        "ACTIVE_SESSION_REFRESH",
-                        "sessionKey" to key,
-                        "package" to controller.packageName,
-                        "sameSessionToken" to (existing.controller.sessionToken == controller.sessionToken),
-                        "controllerInstanceChanged" to true,
-                    )
-                    TrackTalkDebugLog.event(
-                        "CONTROLLER_RESELECTED",
-                        "sessionKey" to key,
-                        "package" to controller.packageName,
-                        "sameSessionToken" to (existing.controller.sessionToken == controller.sessionToken),
-                        "thread" to Thread.currentThread().name,
-                    )
-                    runCatching { existing.controller.unregisterCallback(existing.callback) }
-                    val sessionCallback = callbackFor(key)
-                    runCatching { controller.registerCallback(sessionCallback, handler) }
-                        .onFailure { return@forEach }
-                    existing.callback = sessionCallback
+                scheduleSessionRecovery("ACTIVE_SESSION_READ_FAILED:$reason")
+            }
+            return
+        }
+        updateControllers(controllers, reason = reason)
+        publish(eventType)
+        if (recovery) {
+            TrackTalkDebugLog.event(
+                "SESSION_RECOVERY_DONE",
+                "reason" to reason,
+                "recovered" to true,
+                "activeSessionCount" to sessions.size,
+            )
+        }
+    }
+
+    /**
+     * A recovery is queued onto the monitor looper so a dying controller cannot mutate the
+     * session map while its callback or a snapshot iteration is still executing. This is not a
+     * polling loop: one framework failure/destroy event schedules one immediate reconciliation.
+     */
+    private fun scheduleSessionRecovery(reason: String) {
+        if (!started || sessionRecoveryScheduled) return
+        val scheduledForLifecycleGeneration = monitorLifecycleGeneration
+        sessionRecoveryScheduled = true
+        handler.post {
+            sessionRecoveryScheduled = false
+            if (!started || scheduledForLifecycleGeneration != monitorLifecycleGeneration) {
+                TrackTalkDebugLog.event(
+                    "STALE_EVENT_DROPPED",
+                    "event" to "SESSION_RECOVERY",
+                    "scheduledLifecycleGeneration" to scheduledForLifecycleGeneration,
+                    "currentLifecycleGeneration" to monitorLifecycleGeneration,
+                    "reason" to reason,
+                )
+                return@post
+            }
+            refreshControllersFromSystem(reason = reason, recovery = true)
+        }
+    }
+
+    private fun updateControllers(controllers: List<MediaController>, reason: String) {
+        val controllersByKey = linkedMapOf<String, MediaController>()
+        controllers.forEach { controller ->
+            val key = mediaSessionCall(operation = "READ_CONTROLLER_SESSION_KEY") {
+                sessionKey(controller)
+            }
+            if (key == null) {
+                scheduleSessionRecovery("CONTROLLER_KEY_READ_FAILED:$reason")
+            } else {
+                controllersByKey[key] = controller
+            }
+        }
+
+        sessions.values
+            .toList()
+            .filter { it.sessionKey !in controllersByKey }
+            .forEach { tracked ->
+                detachTrackedSession(
+                    sessionKey = tracked.sessionKey,
+                    generation = tracked.generation,
+                    reason = "ABSENT_FROM_ACTIVE_SESSIONS:$reason",
+                )
+            }
+
+        controllersByKey.forEach { (key, controller) ->
+            val existing = sessions[key]
+            when {
+                existing == null -> attachController(key, controller, reason)
+                existing.controller !== controller -> {
+                    val sameFrameworkSession = mediaSessionCall(
+                        operation = "COMPARE_CONTROLLER_SESSION_TOKEN",
+                        sessionKey = key,
+                    ) {
+                        existing.controller.sessionToken == controller.sessionToken
+                    } == true
+                    if (sameFrameworkSession) {
+                        // getActiveSessions() may create a fresh MediaController wrapper for the
+                        // exact same framework token. The already registered controller remains
+                        // valid and keeps its callback generation; wrapper object identity is not
+                        // a playback/session boundary and cannot revoke an owned-pause lease.
+                        TrackTalkDebugLog.event(
+                            "CONTROLLER_WRAPPER_REFRESH_RETAINED",
+                            "sessionKey" to key,
+                            "package" to packageFromSessionKey(key),
+                            "generation" to existing.generation,
+                            "reason" to reason,
+                        )
+                    } else {
+                        TrackTalkDebugLog.event(
+                            "ACTIVE_SESSION_REFRESH",
+                            "sessionKey" to key,
+                            "package" to packageFromSessionKey(key),
+                            "controllerInstanceChanged" to true,
+                            "sameFrameworkSession" to false,
+                            "reason" to reason,
+                        )
+                        detachTrackedSession(
+                            sessionKey = key,
+                            generation = existing.generation,
+                            reason = "CONTROLLER_REPLACED:$reason",
+                        )
+                        attachController(key, controller, "CONTROLLER_REPLACED:$reason")
+                    }
                 }
-                existing.controller = controller
             }
         }
     }
 
-    private fun callbackFor(sessionKey: String): MediaController.Callback = object : MediaController.Callback() {
+    private fun attachController(
+        sessionKey: String,
+        controller: MediaController,
+        reason: String,
+    ) {
+        val generation = controllerGenerations.attach(sessionKey)
+        val callback = callbackFor(sessionKey, generation)
+        val now = System.currentTimeMillis()
+        val tracked = TrackedSession(
+            sessionKey = sessionKey,
+            generation = generation,
+            controller = controller,
+            callback = callback,
+            lastMetadataChangedAt = now,
+            lastPlaybackStateChangedAt = now,
+            lastObservedAt = now,
+        )
+        // Register after publishing this generation to the map. A provider is allowed to deliver
+        // its current state immediately from registerCallback().
+        sessions[sessionKey] = tracked
+        val registered = mediaSessionCall(
+            operation = "REGISTER_CONTROLLER_CALLBACK",
+            sessionKey = sessionKey,
+        ) {
+            controller.registerCallback(callback, handler)
+            true
+        } ?: false
+        if (!registered) {
+            sessions[sessionKey]
+                ?.takeIf { it.generation == generation }
+                ?.let { sessions.remove(sessionKey) }
+            controllerGenerations.invalidate(sessionKey, generation)
+            scheduleSessionRecovery("CONTROLLER_ATTACH_FAILED:$reason")
+            return
+        }
+        TrackTalkDebugLog.event(
+            "CONTROLLER_GENERATION",
+            "stage" to "ATTACHED",
+            "sessionKey" to sessionKey,
+            "generation" to generation,
+            "reason" to reason,
+        )
+        TrackTalkDebugLog.event(
+            "CONTROLLER_ATTACH",
+            "sessionKey" to sessionKey,
+            "package" to packageFromSessionKey(sessionKey),
+            "generation" to generation,
+            "reason" to reason,
+            "thread" to Thread.currentThread().name,
+        )
+    }
+
+    private fun detachTrackedSession(
+        sessionKey: String,
+        generation: Long,
+        reason: String,
+    ): Boolean {
+        val tracked = sessions[sessionKey]
+        if (
+            tracked == null ||
+            tracked.generation != generation ||
+            !controllerGenerations.isCurrent(sessionKey, generation)
+        ) {
+            TrackTalkDebugLog.event(
+                "STALE_EVENT_DROPPED",
+                "event" to "CONTROLLER_DETACH",
+                "sessionKey" to sessionKey,
+                "callbackGeneration" to generation,
+                "currentGeneration" to controllerGenerations.currentGeneration(sessionKey),
+                "reason" to reason,
+            )
+            return false
+        }
+        val unregistered = mediaSessionCall(
+            operation = "UNREGISTER_CONTROLLER_CALLBACK",
+            sessionKey = sessionKey,
+        ) {
+            tracked.controller.unregisterCallback(tracked.callback)
+            true
+        } ?: false
+        activeResumeRequest
+            ?.takeIf {
+                it.token.sessionKey == sessionKey &&
+                    it.token.controllerGeneration == generation
+            }
+            ?.let { request ->
+                rejectRestore(request, "CONTROLLER_INVALIDATED:$reason")
+            }
+        sessions.remove(sessionKey)
+        controllerGenerations.invalidate(sessionKey, generation)
+        if (selectedSessionKey == sessionKey) selectedSessionKey = null
+        TrackTalkDebugLog.event(
+            "CONTROLLER_DETACH",
+            "sessionKey" to sessionKey,
+            "package" to packageFromSessionKey(sessionKey),
+            "generation" to generation,
+            "reason" to reason,
+            "callbackUnregistered" to unregistered,
+            "thread" to Thread.currentThread().name,
+        )
+        TrackTalkDebugLog.event(
+            "CONTROLLER_GENERATION",
+            "stage" to "INVALIDATED",
+            "sessionKey" to sessionKey,
+            "generation" to generation,
+            "reason" to reason,
+        )
+        if (!unregistered) scheduleSessionRecovery("CONTROLLER_DETACH_FAILED:$reason")
+        return true
+    }
+
+    private fun callbackFor(
+        sessionKey: String,
+        generation: Long,
+    ): MediaController.Callback = object : MediaController.Callback() {
         override fun onMetadataChanged(metadata: android.media.MediaMetadata?) {
-            publish(MediaEventType.METADATA, sessionKey)
+            withCurrentControllerCallback(sessionKey, generation, "METADATA_CHANGED") {
+                publish(MediaEventType.METADATA, sessionKey)
+            }
         }
 
         override fun onPlaybackStateChanged(state: android.media.session.PlaybackState?) {
-            observeActiveResumeState(sessionKey, state)
-            publish(MediaEventType.PLAYBACK_STATE, sessionKey)
+            withCurrentControllerCallback(sessionKey, generation, "PLAYBACK_STATE_CHANGED") {
+                recordPlayingCallbackBaseline(sessionKey, state)
+                observeActiveResumeState(sessionKey, state)
+                publish(MediaEventType.PLAYBACK_STATE, sessionKey)
+            }
         }
 
         override fun onQueueChanged(queue: MutableList<MediaSession.QueueItem>?) {
-            publish(MediaEventType.QUEUE, sessionKey)
+            withCurrentControllerCallback(sessionKey, generation, "QUEUE_CHANGED") {
+                publish(MediaEventType.QUEUE, sessionKey)
+            }
         }
 
         override fun onSessionDestroyed() {
-            if (!started) return
-            sessions.remove(sessionKey)?.let { tracked ->
+            withCurrentControllerCallback(sessionKey, generation, "SESSION_DESTROYED") {
                 TrackTalkDebugLog.event(
-                    "CONTROLLER_UNREGISTERED",
+                    "SESSION_DESTROYED",
                     "sessionKey" to sessionKey,
-                    "package" to tracked.controller.packageName,
-                    "reason" to "SESSION_DESTROYED",
-                    "thread" to Thread.currentThread().name,
+                    "generation" to generation,
+                    "package" to packageFromSessionKey(sessionKey),
                 )
-                runCatching { tracked.controller.unregisterCallback(tracked.callback) }
-                if (selectedSessionKey == sessionKey) selectedSessionKey = null
-                publish(MediaEventType.ACTIVE_SESSIONS)
+                detachTrackedSession(
+                    sessionKey = sessionKey,
+                    generation = generation,
+                    reason = "SESSION_DESTROYED",
+                )
+                scheduleSessionRecovery("SESSION_DESTROYED")
             }
         }
+    }
+
+    private inline fun withCurrentControllerCallback(
+        sessionKey: String,
+        generation: Long,
+        event: String,
+        block: () -> Unit,
+    ) {
+        val tracked = sessions[sessionKey]
+        if (
+            !started ||
+            tracked == null ||
+            tracked.generation != generation ||
+            !controllerGenerations.isCurrent(sessionKey, generation)
+        ) {
+            TrackTalkDebugLog.event(
+                "STALE_EVENT_DROPPED",
+                "event" to event,
+                "sessionKey" to sessionKey,
+                "callbackGeneration" to generation,
+                "currentGeneration" to controllerGenerations.currentGeneration(sessionKey),
+                "monitorStarted" to started,
+            )
+            return
+        }
+        block()
     }
 
     private fun publish(eventType: MediaEventType, changedSessionKey: String? = null) {
@@ -375,20 +653,42 @@ class MediaSessionMonitor(
         }
 
         val mediaKeyToken = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            runCatching { manager.getMediaKeyEventSession() }.getOrNull()
+            mediaSessionCall(
+                operation = "GET_MEDIA_KEY_EVENT_SESSION",
+                onFailure = { scheduleSessionRecovery("MEDIA_KEY_SESSION_READ_FAILED") },
+            ) {
+                manager.getMediaKeyEventSession()
+            }
         } else null
-        val snapshots = sessions.map { (key, tracked) ->
-            runCatching {
+        val failedSnapshots = mutableListOf<TrackedSession>()
+        val snapshots = sessions.values.toList().mapNotNull { tracked ->
+            val snapshot = mediaSessionCall(
+                operation = "MAP_SESSION_SNAPSHOT",
+                sessionKey = tracked.sessionKey,
+            ) {
                 SessionSnapshot(
-                    sessionKey = key,
+                    sessionKey = tracked.sessionKey,
                     event = mapper.map(tracked.controller, now),
                     isMediaKeySession = mediaKeyToken != null && mediaKeyToken == tracked.controller.sessionToken,
                     lastMetadataChangedAt = tracked.lastMetadataChangedAt,
                     lastPlaybackStateChangedAt = tracked.lastPlaybackStateChangedAt,
                     lastObservedAt = tracked.lastObservedAt,
+                    controllerGeneration = tracked.generation,
                 )
-            }.getOrNull()
-        }.mapNotNull { it }
+            }
+            if (snapshot == null) failedSnapshots += tracked
+            snapshot
+        }
+        failedSnapshots.forEach { tracked ->
+            detachTrackedSession(
+                sessionKey = tracked.sessionKey,
+                generation = tracked.generation,
+                reason = "SESSION_SNAPSHOT_READ_FAILED",
+            )
+        }
+        if (failedSnapshots.isNotEmpty()) {
+            scheduleSessionRecovery("SESSION_SNAPSHOT_READ_FAILED")
+        }
         val selected = ActiveSessionSelector.select(snapshots)
         observeActiveResume()
         val previousSelection = lastPublishedSelection
@@ -456,63 +756,147 @@ class MediaSessionMonitor(
             "observedAt" to now,
             "thread" to Thread.currentThread().name,
         )
-        runCatching {
-            onUpdate(
-                MediaMonitorUpdate(
-                    selected = selected,
-                    activeSessionCount = sessions.size,
-                    eventType = eventType,
-                    observedAt = now,
-                    observedAtElapsedNanos = observedAtElapsedNanos,
-                    eventSequenceNumber = sequence,
-                    selectedSessionKey = selected?.sessionKey,
-                    callbackThread = Thread.currentThread().name,
-                ),
-            )
+        onUpdate(
+            MediaMonitorUpdate(
+                selected = selected,
+                activeSessionCount = sessions.size,
+                eventType = eventType,
+                observedAt = now,
+                observedAtElapsedNanos = observedAtElapsedNanos,
+                eventSequenceNumber = sequence,
+                selectedSessionKey = selected?.sessionKey,
+                callbackThread = Thread.currentThread().name,
+                selectedControllerGeneration = selected?.controllerGeneration,
+            ),
+        )
+    }
+
+    /**
+     * MediaController's synchronous PLAYING snapshot may contain a position-
+     * adjusted update time from the read itself. Only an actual ordered
+     * PLAYING callback supplies the baseline that a provider may legitimately
+     * reuse in its later PAUSED callback.
+     */
+    private fun recordPlayingCallbackBaseline(
+        sessionKey: String,
+        state: PlaybackState?,
+    ) {
+        if (state?.state != PlaybackState.STATE_PLAYING) return
+        val tracked = sessions[sessionKey] ?: return
+        val stateUpdatedAtElapsedMs = state.lastPositionUpdateTime.takeIf { it > 0L }
+        if (stateUpdatedAtElapsedMs == null) {
+            tracked.lastPlayingCallbackStateUpdatedAtElapsedMs = null
+            tracked.lastPlayingCallbackCoreFingerprint = null
+            return
         }
+        val event = readTrackedEvent(tracked, "MAP_PLAYING_CALLBACK_BASELINE") ?: return
+        if (!event.isPlaying) return
+        tracked.lastPlayingCallbackStateUpdatedAtElapsedMs = stateUpdatedAtElapsedMs
+        tracked.lastPlayingCallbackCoreFingerprint = TrackFingerprint.core(event)
     }
 
     private fun sessionKey(controller: MediaController): String =
         "${controller.packageName}:${controller.sessionToken.hashCode()}"
+
+    private fun packageFromSessionKey(sessionKey: String): String = sessionKey.substringBefore(':')
+
+    /**
+     * Android MediaController calls cross a process/binder boundary. Keep the failure isolation
+     * here, immediately around that boundary, rather than swallowing exceptions around monitor
+     * state transitions or controller policy.
+     */
+    private fun <T> mediaSessionCall(
+        operation: String,
+        sessionKey: String? = null,
+        onFailure: (() -> Unit)? = null,
+        block: () -> T,
+    ): T? = try {
+        block()
+    } catch (failure: DeadObjectException) {
+        logSessionReadFailure(operation, sessionKey, failure)
+        onFailure?.invoke()
+        null
+    } catch (failure: RemoteException) {
+        logSessionReadFailure(operation, sessionKey, failure)
+        onFailure?.invoke()
+        null
+    } catch (failure: SecurityException) {
+        logSessionReadFailure(operation, sessionKey, failure)
+        onFailure?.invoke()
+        null
+    } catch (failure: IllegalStateException) {
+        logSessionReadFailure(operation, sessionKey, failure)
+        onFailure?.invoke()
+        null
+    } catch (failure: RuntimeException) {
+        // A dead remote MediaSession can surface as an unchecked binder failure. This catch is
+        // deliberately limited to direct framework reads/registers/transport commands above.
+        logSessionReadFailure(operation, sessionKey, failure)
+        onFailure?.invoke()
+        null
+    }
+
+    private fun logSessionReadFailure(
+        operation: String,
+        sessionKey: String?,
+        failure: Throwable,
+    ) {
+        TrackTalkDebugLog.event(
+            "SESSION_READ_FAILED",
+            "operation" to operation,
+            "sessionKey" to sessionKey,
+            "package" to sessionKey?.let(::packageFromSessionKey),
+            "failure" to failure.javaClass.simpleName,
+        )
+    }
+
+    private fun invalidateFailedTrackedSession(
+        tracked: TrackedSession,
+        reason: String,
+    ) {
+        detachTrackedSession(
+            sessionKey = tracked.sessionKey,
+            generation = tracked.generation,
+            reason = "$reason:SESSION_READ_FAILED",
+        )
+        scheduleSessionRecovery("$reason:SESSION_READ_FAILED")
+    }
+
+    private fun readTrackedEvent(
+        tracked: TrackedSession,
+        operation: String,
+    ): PlaybackEvent? {
+        val event = mediaSessionCall(
+            operation = operation,
+            sessionKey = tracked.sessionKey,
+        ) {
+            mapper.map(tracked.controller)
+        }
+        if (event != null) return event
+        invalidateFailedTrackedSession(tracked, operation)
+        return null
+    }
 
     private fun selectedTrackedSession(): TrackedSession? =
         selectedSessionKey?.let(sessions::get)
             ?: sessions.values.maxByOrNull { it.lastObservedAt }
 
     private fun resolveRestoreSession(token: PlaybackPauseToken): RestoreSessionCandidate? {
-        val exact = sessions[token.sessionKey]
-        val ordered = buildList {
-            exact?.let(::add)
-            sessions.values
-                .asSequence()
-                .filter { it !== exact }
-                .filter { it.controller.packageName == token.sourcePackageName }
-                .sortedByDescending { it.lastObservedAt }
-                .forEach(::add)
+        if (token.monitorLifecycleGeneration != monitorLifecycleGeneration) return null
+        if (selectedSessionKey != token.sessionKey) return null
+        val tracked = sessions[token.sessionKey] ?: return null
+        if (
+            tracked.generation != token.controllerGeneration ||
+                !controllerGenerations.isCurrent(token.sessionKey, token.controllerGeneration)
+        ) {
+            return null
         }
-        val candidates = ordered.mapNotNull { tracked ->
-            val event = runCatching { mapper.map(tracked.controller) }.getOrNull() ?: return@mapNotNull null
-            RestoreSessionCandidate(
-                controller = tracked.controller,
-                event = event,
-                match = PlaybackRestoreTrackMatcher.classify(event, token),
-                retained = false,
-            )
-        }
-        val activeCandidate = candidates.firstOrNull { it.match == PlaybackRestoreTrackMatch.MATCH }
-            ?: candidates.firstOrNull { it.match == PlaybackRestoreTrackMatch.INSUFFICIENT }
-            ?: candidates.firstOrNull()
-        if (activeCandidate != null) return activeCandidate
-
-        val retained = retainedPausedController?.takeIf {
-            it.sessionKey == token.sessionKey && it.sourcePackageName == token.sourcePackageName
-        } ?: return null
-        val retainedEvent = runCatching { mapper.map(retained.controller) }.getOrNull() ?: return null
+        val event = readTrackedEvent(tracked, "MAP_RESTORE_CANDIDATE") ?: return null
         return RestoreSessionCandidate(
-            controller = retained.controller,
-            event = retainedEvent,
-            match = PlaybackRestoreTrackMatcher.classify(retainedEvent, token),
-            retained = true,
+            sessionKey = tracked.sessionKey,
+            controller = tracked.controller,
+            event = event,
+            match = PlaybackRestoreTrackMatcher.classify(event, token),
         )
     }
 
@@ -560,134 +944,134 @@ class MediaSessionMonitor(
 
     private fun attemptRestore(request: ActiveResumeRequest) {
         if (!isActive(request)) return
-        val candidate = resolveRestoreSession(request.token)
-        if (candidate == null) {
-            waitForRestorableSession(request, "SESSION_UNAVAILABLE")
+        val candidate = restoreCandidateOrReject(request, "RESTORE_ATTEMPT") ?: return
+        if (candidate.event.isPlaying) {
+            if (request.ownedPauseAcknowledged) {
+                request.playingObserved = true
+                completeRestore(
+                    request,
+                    PlaybackRestoreEventType.PLAYING_CONFIRMED,
+                    "ALREADY_PLAYING_AFTER_OWNED_PAUSE",
+                )
+            } else {
+                waitForOwnedPauseAcknowledgement(request, "PLAYER_STILL_PLAYING")
+            }
             return
         }
-        when (candidate.match) {
-            PlaybackRestoreTrackMatch.INSUFFICIENT -> {
-                waitForRestorableSession(request, "SESSION_IDENTITY_INCOMPLETE")
-                return
-            }
-
-            PlaybackRestoreTrackMatch.MISMATCH -> {
-                completeRestore(request, PlaybackRestoreEventType.CANCELLED, "TRACK_CHANGED")
-                return
-            }
-
-            PlaybackRestoreTrackMatch.MATCH -> Unit
+        if (candidate.event.playbackState != PlaybackStatus.PAUSED) {
+            rejectRestore(request, "NON_PAUSED_RESTORE_STATE_${candidate.event.playbackState}")
+            return
         }
-        request.waitingForSession = false
-        request.lastSessionWaitReason = null
-
-        // If TrackTalk already observed its own PAUSED acknowledgement and the
-        // exact owned track is PLAYING now, a newer actor has restored it. A
-        // second PLAY is redundant and can make some providers visibly bounce.
-        // The unacknowledged late-PAUSE case still uses the existing play fence.
-        if (
-            request.ownedPauseAcknowledged &&
-            request.playCommandCount == 0 &&
-            candidate.event.isPlaying
-        ) {
-            request.playingObserved = true
-            completeRestore(
-                request,
-                PlaybackRestoreEventType.PLAYING_CONFIRMED,
-                "ALREADY_PLAYING_AFTER_OWNED_PAUSE",
+        if (!request.ownedPauseAcknowledged) {
+            if (!isOwnedPauseAcknowledgement(candidate.event, request.token)) {
+                waitForOwnedPauseAcknowledgement(request, "PAUSED_STATE_NOT_ATTRIBUTABLE_YET")
+                return
+            }
+            request.ownedPauseAcknowledged = true
+            request.waitingForOwnedPause = false
+            TrackTalkDebugLog.event(
+                "RESTORE_PAUSE_ACKNOWLEDGED",
+                "announcementGeneration" to request.announcementCycleId,
+                "controllerGeneration" to request.token.controllerGeneration,
+                "stateUpdatedAtElapsedNanos" to candidate.event.playbackStateUpdateElapsedMs
+                    ?.times(NANOS_PER_MILLISECOND),
+                "source" to candidate.event.sourcePackageName,
             )
-            return
         }
+        if (request.playCommandCount > 0 || request.commandInFlight) return
 
         val requestedAtNanos = SystemClock.elapsedRealtimeNanos()
-        val attempt = synchronized(request) {
-            if (request.commandInFlight || request.playCommandCount >= MAX_PLAY_COMMANDS) return
-            if (request.playCommandCount > 0 && !request.retryAllowed) return
-            request.commandInFlight = true
-            request.retryAllowed = false
-            request.playCommandCount += 1
-            request.lastPlayRequestedAtElapsedNanos = requestedAtNanos
-            request.playCommandCount
-        }
-        val retry = attempt > 1
+        request.commandInFlight = true
+        request.playCommandCount = 1
+        request.lastPlayRequestedAtElapsedNanos = requestedAtNanos
+        TrackTalkDebugLog.event(
+            "PLAYBACK_RESTORE_ALLOWED",
+            "announcementGeneration" to request.announcementCycleId,
+            "controllerGeneration" to request.token.controllerGeneration,
+            "reason" to "VALID_OWNED_PAUSE_LEASE",
+        )
         val issued = try {
-            runCatching {
+            mediaSessionCall(
+                operation = "TRANSPORT_RESTORE_PLAY",
+                sessionKey = candidate.sessionKey,
+                onFailure = {
+                    sessions[candidate.sessionKey]?.let { tracked ->
+                        invalidateFailedTrackedSession(tracked, "TRANSPORT_RESTORE_PLAY")
+                    }
+                },
+            ) {
                 candidate.controller.transportControls.play()
                 true
-            }.getOrDefault(false)
+            } ?: false
         } finally {
             request.commandInFlight = false
         }
         emitRestoreEvent(
             request = request,
-            type = if (retry) {
-                PlaybackRestoreEventType.PLAY_RETRY_REQUESTED
-            } else {
-                PlaybackRestoreEventType.PLAY_REQUESTED
-            },
-            reason = when {
-                !issued -> "COMMAND_FAILED"
-                candidate.retained -> "COMMAND_ISSUED_RETAINED_CONTROLLER"
-                else -> "COMMAND_ISSUED"
-            },
+            type = PlaybackRestoreEventType.PLAY_REQUESTED,
+            reason = if (issued) "COMMAND_ISSUED" else "COMMAND_FAILED",
             elapsedRealtimeNanos = requestedAtNanos,
-            attempt = attempt,
-            sessionKey = sessionKey(candidate.controller),
+            attempt = 1,
+            sessionKey = candidate.sessionKey,
             mediaId = candidate.event.mediaId,
         )
-        scheduleRestoreCheck(
-            request,
-            if (request.initialStateWasPlaying && !retry) LATE_PAUSE_CONFIRMATION_MS else PLAY_CONFIRMATION_MS,
+        if (!issued) {
+            completeRestore(request, PlaybackRestoreEventType.FAILED, "COMMAND_FAILED")
+            return
+        }
+        scheduleRestoreCheck(request, PLAY_CONFIRMATION_MS)
+    }
+
+    private fun waitForOwnedPauseAcknowledgement(
+        request: ActiveResumeRequest,
+        reason: String,
+    ) {
+        if (request.waitingForOwnedPause) return
+        request.waitingForOwnedPause = true
+        TrackTalkDebugLog.event(
+            "RESTORE_WAITING_FOR_PAUSE_ACK",
+            "announcementGeneration" to request.announcementCycleId,
+            "controllerGeneration" to request.token.controllerGeneration,
+            "reason" to reason,
+            "expiryMs" to pauseAcknowledgementExpiryMs,
         )
+        val checkGeneration = ++request.checkGeneration
+        handler.postDelayed({
+            if (!isActive(request) || request.checkGeneration != checkGeneration) return@postDelayed
+            TrackTalkDebugLog.event(
+                "RESTORE_LEASE_EXPIRED",
+                "announcementGeneration" to request.announcementCycleId,
+                "controllerGeneration" to request.token.controllerGeneration,
+                "reason" to "PAUSE_ACKNOWLEDGEMENT_EXPIRED",
+            )
+            completeRestore(
+                request,
+                PlaybackRestoreEventType.CANCELLED,
+                "PAUSE_ACKNOWLEDGEMENT_EXPIRED",
+            )
+        }, pauseAcknowledgementExpiryMs)
     }
 
     private fun observeActiveResume() {
         val request = activeResumeRequest ?: return
         if (!isActive(request)) return
-        val candidate = resolveRestoreSession(request.token) ?: run {
-            waitForRestorableSession(request, "SESSION_UNAVAILABLE_CALLBACK")
-            return
-        }
-        when (candidate.match) {
-            PlaybackRestoreTrackMatch.INSUFFICIENT -> {
-                waitForRestorableSession(request, "SESSION_IDENTITY_INCOMPLETE_CALLBACK")
-                return
-            }
-
-            PlaybackRestoreTrackMatch.MISMATCH -> {
-                completeRestore(request, PlaybackRestoreEventType.CANCELLED, "TRACK_CHANGED")
-                return
-            }
-
-            PlaybackRestoreTrackMatch.MATCH -> Unit
-        }
+        val candidate = restoreCandidateOrReject(request, "RESTORE_OBSERVATION") ?: return
         val event = candidate.event
         if (event.isPlaying) {
             request.playingObserved = true
-            // When resume starts before the media app publishes TrackTalk's
-            // delayed PAUSED acknowledgement, one early PLAYING callback is not
-            // final. The bounded confirmation handles that race. Otherwise a
-            // PLAYING callback is the authoritative acknowledgement.
-            if (!request.initialStateWasPlaying || request.playCommandCount > 1) {
+            if (request.playCommandCount > 0) {
                 completeRestore(request, PlaybackRestoreEventType.PLAYING_CONFIRMED, "CALLBACK")
             }
-        } else if (request.waitingForSession && request.playCommandCount < MAX_PLAY_COMMANDS) {
-            // YouTube Music and other providers can temporarily destroy their
-            // MediaSession while TrackTalk owns a pause. The active-session or
-            // metadata callback is the fastest safe recovery signal: issue the
-            // first PLAY (or sole retry) only after the same logical track is
-            // identifiable again.
+        } else if (event.playbackState == PlaybackStatus.PAUSED && request.playCommandCount == 0) {
             attemptRestore(request)
-        } else if (event.playbackState == PlaybackStatus.PAUSED) {
-            request.pausedObservedAfterRequest = true
         }
     }
 
     /**
      * Preserve the ordered state carried by MediaController's callback. If we
      * only remap controller.playbackState later, a quick user PAUSE can replace
-     * the preceding PLAYING value before TrackTalk observes it, causing the
-     * bounded retry to override that newer user intent.
+     * the preceding PLAYING value before TrackTalk observes it. Ordered callbacks
+     * let the restore lease fail safe before any later transport action.
      */
     private fun observeActiveResumeState(
         callbackSessionKey: String,
@@ -697,29 +1081,32 @@ class MediaSessionMonitor(
         if (!isActive(request) || state == null) return
         val tracked = sessions[callbackSessionKey] ?: return
         if (
-            callbackSessionKey != request.token.sessionKey &&
-            tracked.controller.packageName != request.token.sourcePackageName
+            callbackSessionKey != request.token.sessionKey ||
+                tracked.generation != request.token.controllerGeneration
         ) {
+            rejectRestore(request, "CONTROLLER_OR_SESSION_CHANGED_DURING_RESTORE")
             return
         }
-        val event = runCatching { mapper.map(tracked.controller) }.getOrNull() ?: return
+        val event = readTrackedEvent(tracked, "MAP_RESTORE_STATE_CALLBACK") ?: return
         when (PlaybackRestoreTrackMatcher.classify(event, request.token)) {
             PlaybackRestoreTrackMatch.INSUFFICIENT -> {
-                waitForRestorableSession(request, "SESSION_IDENTITY_INCOMPLETE_STATE_CALLBACK")
+                rejectRestore(request, "SESSION_IDENTITY_INCOMPLETE_STATE_CALLBACK")
                 return
             }
 
             PlaybackRestoreTrackMatch.MISMATCH -> {
-                completeRestore(request, PlaybackRestoreEventType.CANCELLED, "TRACK_CHANGED")
+                rejectRestore(request, "TRACK_CHANGED")
                 return
             }
 
-            PlaybackRestoreTrackMatch.MATCH -> Unit
+            PlaybackRestoreTrackMatch.MATCH,
+            PlaybackRestoreTrackMatch.METADATA_ENRICHMENT,
+            -> Unit
         }
         when (state.state) {
             PlaybackState.STATE_PLAYING -> {
                 request.playingObserved = true
-                if (!request.initialStateWasPlaying || request.playCommandCount > 1) {
+                if (request.playCommandCount > 0) {
                     completeRestore(request, PlaybackRestoreEventType.PLAYING_CONFIRMED, "STATE_CALLBACK")
                 }
             }
@@ -728,45 +1115,69 @@ class MediaSessionMonitor(
                 val stateUpdatedAtNanos = state.lastPositionUpdateTime
                     .takeIf { it > 0L }
                     ?.times(NANOS_PER_MILLISECOND)
-                val pausedStateCreatedAfterPlay = stateUpdatedAtNanos != null &&
-                    request.lastPlayRequestedAtElapsedNanos > 0L &&
-                    stateUpdatedAtNanos >= request.lastPlayRequestedAtElapsedNanos
                 TrackTalkDebugLog.event(
                     "PLAYBACK_RESTORE_PAUSE_CLASSIFICATION",
                     "announcementCycleId" to request.announcementCycleId,
                     "restoreRequestId" to request.requestId,
-                    "initialStateWasPlaying" to request.initialStateWasPlaying,
-                    "playingObserved" to request.playingObserved,
+                    "controllerGeneration" to request.token.controllerGeneration,
                     "stateUpdatedAtElapsedNanos" to stateUpdatedAtNanos,
+                    "pauseRequestedAtElapsedNanos" to request.token.pauseRequestedAtElapsedNanos,
+                    "playingBaselineAtPauseElapsedNanos" to
+                        request.token.playbackStateUpdatedAtPauseElapsedNanos,
+                    "pauseCommandEventSequenceNumber" to
+                        request.token.eventSequenceNumberAtPauseCommand,
+                    "callbackEventSequenceNumber" to (eventSequenceNumber + 1L),
                     "lastPlayRequestedAtElapsedNanos" to request.lastPlayRequestedAtElapsedNanos,
-                    "pausedStateCreatedAfterPlay" to pausedStateCreatedAfterPlay,
                 )
-                // A PAUSED callback can arrive after PLAY even though its
-                // PlaybackState was created for TrackTalk's earlier PAUSE.
-                // Android exposes that state's elapsedRealtime timestamp, so
-                // only a state created at/after PLAY is newer intent. Preserve
-                // the legacy delayed-PAUSE race when restore began while the
-                // provider still reported PLAYING.
-                if (
-                    !request.initialStateWasPlaying &&
-                    request.playCommandCount > 0 &&
-                    request.playingObserved
-                ) {
-                    completeRestore(
-                        request,
-                        PlaybackRestoreEventType.CANCELLED,
-                        "PAUSED_CALLBACK_AFTER_PLAY_REQUEST",
+                if (request.playCommandCount == 0) {
+                    val callbackObservedAtElapsedNanos = SystemClock.elapsedRealtimeNanos()
+                    val callbackEventSequenceNumber = eventSequenceNumber + 1L
+                    val rejectionReason = ownedPauseCallbackRejectionReason(
+                        token = request.token,
+                        stateUpdatedAtElapsedNanos = stateUpdatedAtNanos,
+                        callbackObservedAtElapsedNanos = callbackObservedAtElapsedNanos,
+                        callbackEventSequenceNumber = callbackEventSequenceNumber,
                     )
-                } else if (
-                    !request.initialStateWasPlaying &&
-                    request.playCommandCount > 0 &&
-                    pausedStateCreatedAfterPlay
-                ) {
-                    schedulePauseIntentConfirmation(request, stateUpdatedAtNanos)
+                    if (rejectionReason == null) {
+                        request.ownedPauseAcknowledged = true
+                        request.waitingForOwnedPause = false
+                        TrackTalkDebugLog.event(
+                            "RESTORE_PAUSE_ACKNOWLEDGED",
+                            "announcementGeneration" to request.announcementCycleId,
+                            "controllerGeneration" to request.token.controllerGeneration,
+                            "stateUpdatedAtElapsedNanos" to stateUpdatedAtNanos,
+                            "callbackObservedAtElapsedNanos" to callbackObservedAtElapsedNanos,
+                            "callbackEventSequenceNumber" to callbackEventSequenceNumber,
+                            "evidence" to pauseCallbackAcknowledgementEvidence(
+                                token = request.token,
+                                stateUpdatedAtElapsedNanos = stateUpdatedAtNanos,
+                            ),
+                            "source" to event.sourcePackageName,
+                        )
+                        attemptRestore(request)
+                    } else {
+                        TrackTalkDebugLog.event(
+                            "RESTORE_PAUSE_ACK_REJECTED",
+                            "announcementGeneration" to request.announcementCycleId,
+                            "controllerGeneration" to request.token.controllerGeneration,
+                            "reason" to rejectionReason,
+                            "stateUpdatedAtElapsedNanos" to stateUpdatedAtNanos,
+                            "callbackObservedAtElapsedNanos" to callbackObservedAtElapsedNanos,
+                            "callbackEventSequenceNumber" to callbackEventSequenceNumber,
+                        )
+                        waitForOwnedPauseAcknowledgement(request, "STALE_OR_AMBIGUOUS_PAUSED_CALLBACK")
+                    }
                 } else {
-                    request.pausedObservedAfterRequest = true
+                    val newerThanPlay = stateUpdatedAtNanos == null ||
+                        stateUpdatedAtNanos >= request.lastPlayRequestedAtElapsedNanos
+                    if (newerThanPlay) rejectRestore(request, "PAUSED_AFTER_PLAY_REQUEST")
                 }
             }
+
+            PlaybackState.STATE_STOPPED,
+            PlaybackState.STATE_NONE,
+            PlaybackState.STATE_ERROR,
+            -> rejectRestore(request, "NON_PLAYABLE_STATE_CALLBACK_${state.state}")
         }
     }
 
@@ -778,149 +1189,122 @@ class MediaSessionMonitor(
         }, delayMs)
     }
 
-    private fun schedulePauseIntentConfirmation(
-        request: ActiveResumeRequest,
-        stateUpdatedAtElapsedNanos: Long,
-    ) {
-        val checkGeneration = ++request.pauseIntentCheckGeneration
-        request.pendingPauseStateUpdatedAtElapsedNanos = stateUpdatedAtElapsedNanos
-        TrackTalkDebugLog.event(
-            "PLAYBACK_RESTORE_PAUSE_INTENT",
-            "announcementCycleId" to request.announcementCycleId,
-            "restoreRequestId" to request.requestId,
-            "stage" to "PENDING",
-            "stateUpdatedAtElapsedNanos" to stateUpdatedAtElapsedNanos,
-            "confirmationDelayMs" to PAUSE_INTENT_CONFIRMATION_MS,
-        )
-        handler.postDelayed({
-            if (
-                !isActive(request) ||
-                request.pauseIntentCheckGeneration != checkGeneration ||
-                request.pendingPauseStateUpdatedAtElapsedNanos != stateUpdatedAtElapsedNanos
-            ) {
-                return@postDelayed
-            }
-            val candidate = resolveRestoreSession(request.token) ?: return@postDelayed
-            when (candidate.match) {
-                PlaybackRestoreTrackMatch.MISMATCH -> {
-                    completeRestore(request, PlaybackRestoreEventType.CANCELLED, "TRACK_CHANGED")
-                }
-
-                PlaybackRestoreTrackMatch.INSUFFICIENT -> Unit
-
-                PlaybackRestoreTrackMatch.MATCH -> {
-                    if (candidate.event.isPlaying) {
-                        completeRestore(
-                            request,
-                            PlaybackRestoreEventType.PLAYING_CONFIRMED,
-                            "PAUSE_INTENT_GRACE",
-                        )
-                        return@postDelayed
-                    }
-                    val currentState = candidate.controller.playbackState
-                    val currentStateUpdatedAtNanos = currentState?.lastPositionUpdateTime
-                        ?.takeIf { it > 0L }
-                        ?.times(NANOS_PER_MILLISECOND)
-                    if (
-                        currentState?.state == PlaybackState.STATE_PAUSED &&
-                        currentStateUpdatedAtNanos != null &&
-                        currentStateUpdatedAtNanos >= stateUpdatedAtElapsedNanos
-                    ) {
-                        TrackTalkDebugLog.event(
-                            "PLAYBACK_RESTORE_PAUSE_INTENT",
-                            "announcementCycleId" to request.announcementCycleId,
-                            "restoreRequestId" to request.requestId,
-                            "stage" to "CONFIRMED",
-                            "stateUpdatedAtElapsedNanos" to currentStateUpdatedAtNanos,
-                        )
-                        completeRestore(
-                            request,
-                            PlaybackRestoreEventType.CANCELLED,
-                            "PAUSED_CALLBACK_AFTER_PLAY_REQUEST",
-                        )
-                    }
-                }
-            }
-        }, PAUSE_INTENT_CONFIRMATION_MS)
-    }
-
     private fun confirmRestore(request: ActiveResumeRequest) {
         if (!isActive(request)) return
-        val candidate = resolveRestoreSession(request.token)
-        if (candidate == null) {
-            waitForRestorableSession(request, "SESSION_UNAVAILABLE_CONFIRMATION")
-            return
-        }
-        when (candidate.match) {
-            PlaybackRestoreTrackMatch.INSUFFICIENT -> {
-                waitForRestorableSession(request, "SESSION_IDENTITY_INCOMPLETE_CONFIRMATION")
-                return
-            }
-
-            PlaybackRestoreTrackMatch.MISMATCH -> {
-                completeRestore(request, PlaybackRestoreEventType.CANCELLED, "TRACK_CHANGED")
-                return
-            }
-
-            PlaybackRestoreTrackMatch.MATCH -> Unit
-        }
-        request.waitingForSession = false
-        request.lastSessionWaitReason = null
+        val candidate = restoreCandidateOrReject(request, "RESTORE_CONFIRMATION") ?: return
         val event = candidate.event
         if (event.isPlaying) {
-            completeRestore(request, PlaybackRestoreEventType.PLAYING_CONFIRMED, "CONFIRMATION")
+            if (request.playCommandCount > 0) {
+                completeRestore(
+                    request,
+                    PlaybackRestoreEventType.PLAYING_CONFIRMED,
+                    "CONFIRMATION",
+                )
+            } else {
+                waitForOwnedPauseAcknowledgement(request, "PLAYER_STILL_PLAYING")
+            }
             return
         }
-
-        // If PLAYING was already acknowledged after a normal paused restore,
-        // a subsequent PAUSED state is a newer user/player decision. Never let
-        // a stale retry override it. The only exception is the known ordering
-        // where resume began while the provider still reported PLAYING and its
-        // delayed acknowledgement of TrackTalk's own PAUSE arrived afterward.
-        val delayedTrackTalkPause = request.initialStateWasPlaying &&
-            request.playCommandCount == 1 &&
-            request.pausedObservedAfterRequest
-        if (request.playingObserved && !delayedTrackTalkPause) {
-            completeRestore(request, PlaybackRestoreEventType.CANCELLED, "NEW_PAUSE_AFTER_PLAYING")
-            return
-        }
-        if (request.playCommandCount < MAX_PLAY_COMMANDS) {
-            request.retryAllowed = true
+        if (event.playbackState == PlaybackStatus.PAUSED && request.playCommandCount == 0) {
             attemptRestore(request)
         } else {
             completeRestore(request, PlaybackRestoreEventType.FAILED, "PLAYER_REMAINED_PAUSED")
         }
     }
 
-    private fun waitForRestorableSession(request: ActiveResumeRequest, reason: String) {
-        if (!isActive(request)) return
-        val nowNanos = SystemClock.elapsedRealtimeNanos()
-        val remainingNanos = request.sessionRecoveryDeadlineElapsedNanos - nowNanos
-        if (remainingNanos <= 0L) {
-            completeRestore(request, PlaybackRestoreEventType.FAILED, "SESSION_RECOVERY_TIMEOUT")
-            return
+    private fun restoreCandidateOrReject(
+        request: ActiveResumeRequest,
+        stage: String,
+    ): RestoreSessionCandidate? {
+        val candidate = resolveRestoreSession(request.token) ?: run {
+            rejectRestore(request, "${stage}_LEASE_SESSION_INVALID")
+            return null
         }
-        if (request.waitingForSession) {
-            if (request.lastSessionWaitReason != reason) {
-                request.lastSessionWaitReason = reason
-                emitRestoreEvent(request, PlaybackRestoreEventType.WAITING_FOR_SESSION, reason)
+        when (candidate.match) {
+            PlaybackRestoreTrackMatch.MATCH,
+            PlaybackRestoreTrackMatch.METADATA_ENRICHMENT,
+            -> Unit
+            PlaybackRestoreTrackMatch.MISMATCH -> {
+                rejectRestore(request, "${stage}_TRACK_CHANGED")
+                return null
             }
-            return
+            PlaybackRestoreTrackMatch.INSUFFICIENT -> {
+                rejectRestore(request, "${stage}_TRACK_IDENTITY_INCOMPLETE")
+                return null
+            }
         }
-        if (request.playCommandCount > 0) {
-            // A command addressed to a session that then disappeared may have
-            // been lost. Permit exactly the one bounded retry when the same
-            // logical track is identifiable again.
-            request.retryAllowed = true
+        when (candidate.event.playbackState) {
+            PlaybackStatus.STOPPED,
+            PlaybackStatus.NONE,
+            PlaybackStatus.BUFFERING,
+            -> {
+                rejectRestore(request, "${stage}_STATE_${candidate.event.playbackState}")
+                return null
+            }
+            PlaybackStatus.PLAYING,
+            PlaybackStatus.PAUSED,
+            -> Unit
         }
-        request.waitingForSession = true
-        request.lastSessionWaitReason = reason
-        emitRestoreEvent(request, PlaybackRestoreEventType.WAITING_FOR_SESSION, reason)
-        val remainingMs = ((remainingNanos + NANOS_PER_MILLISECOND - 1L) / NANOS_PER_MILLISECOND)
-            .coerceAtLeast(1L)
-        // One deadline only. Active-session and metadata callbacks attempt
-        // recovery immediately; no position/state polling is introduced.
-        scheduleRestoreCheck(request, remainingMs)
+        return candidate
+    }
+
+    private fun isOwnedPauseAcknowledgement(
+        event: PlaybackEvent,
+        token: PlaybackPauseToken,
+    ): Boolean {
+        if (event.playbackState != PlaybackStatus.PAUSED) return false
+        val stateUpdatedAtNanos = event.playbackStateUpdateElapsedMs
+            ?.takeIf { it > 0L }
+            ?.times(NANOS_PER_MILLISECOND)
+            ?: return false
+        return stateUpdatedAtNanos >= token.pauseRequestedAtElapsedNanos
+    }
+
+    /**
+     * Command provenance comes from TrackTalk's local callback ordering plus
+     * the exact controller/session/track checks performed by the caller.
+     * Provider timestamps may be reused and are only auxiliary evidence: an
+     * explicit regression behind a known same-track PLAYING callback is stale,
+     * while a missing baseline or timestamp cannot veto an ordered callback.
+     */
+    private fun ownedPauseCallbackRejectionReason(
+        token: PlaybackPauseToken,
+        stateUpdatedAtElapsedNanos: Long?,
+        callbackObservedAtElapsedNanos: Long,
+        callbackEventSequenceNumber: Long,
+    ): String? = when {
+        callbackObservedAtElapsedNanos <= token.pauseRequestedAtElapsedNanos ->
+            "CALLBACK_NOT_AFTER_PAUSE_COMMAND"
+        callbackEventSequenceNumber <= token.eventSequenceNumberAtPauseCommand ->
+            "PRE_COMMAND_LOCAL_EVENT"
+        stateUpdatedAtElapsedNanos != null &&
+            token.playbackStateUpdatedAtPauseElapsedNanos != null &&
+            stateUpdatedAtElapsedNanos < token.playbackStateUpdatedAtPauseElapsedNanos ->
+            "SOURCE_TIMESTAMP_BEFORE_PLAYING_BASELINE"
+        else -> null
+    }
+
+    private fun pauseCallbackAcknowledgementEvidence(
+        token: PlaybackPauseToken,
+        stateUpdatedAtElapsedNanos: Long?,
+    ): String = when {
+        stateUpdatedAtElapsedNanos != null &&
+            stateUpdatedAtElapsedNanos >= token.pauseRequestedAtElapsedNanos ->
+            "STATE_TIMESTAMP_AFTER_COMMAND"
+        stateUpdatedAtElapsedNanos != null && token.playbackStateUpdatedAtPauseElapsedNanos != null ->
+            "ORDERED_CALLBACK_FROM_PLAYING_BASELINE"
+        else -> "LOCAL_POST_COMMAND_CALLBACK"
+    }
+
+    private fun rejectRestore(request: ActiveResumeRequest, reason: String) {
+        if (!isActive(request)) return
+        TrackTalkDebugLog.event(
+            "PLAYBACK_RESTORE_REJECTED",
+            "announcementGeneration" to request.announcementCycleId,
+            "controllerGeneration" to request.token.controllerGeneration,
+            "reason" to reason,
+        )
+        completeRestore(request, PlaybackRestoreEventType.CANCELLED, reason)
     }
 
     private fun isActive(request: ActiveResumeRequest): Boolean =
@@ -941,9 +1325,6 @@ class MediaSessionMonitor(
         request.completed = true
         request.checkGeneration += 1
         activeResumeRequest = null
-        if (retainedPausedController?.sessionKey == request.token.sessionKey) {
-            retainedPausedController = null
-        }
         emitRestoreEvent(request, type, reason)
     }
 
@@ -979,7 +1360,16 @@ class MediaSessionMonitor(
             "mediaId" to event.mediaId,
             "reason" to event.reason,
         )
-        runCatching { request.callback(event) }
+        try {
+            request.callback(event)
+        } catch (failure: RuntimeException) {
+            TrackTalkDebugLog.event(
+                "PLAYBACK_RESTORE_CALLBACK_FAILED",
+                "announcementCycleId" to event.announcementCycleId,
+                "restoreRequestId" to event.requestId,
+                "failure" to failure.javaClass.simpleName,
+            )
+        }
     }
 
     private fun <T> runOnMonitorThread(block: () -> T): T {
@@ -989,11 +1379,15 @@ class MediaSessionMonitor(
         return task.get(MONITOR_THREAD_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
     }
 
-    private fun resolveAppName(packageName: String): String = runCatching {
+    private fun resolveAppName(packageName: String): String = try {
         appContext.packageManager.getApplicationLabel(
             appContext.packageManager.getApplicationInfo(packageName, 0),
         ).toString()
-    }.getOrDefault(packageName)
+    } catch (_: PackageManager.NameNotFoundException) {
+        packageName
+    } catch (_: SecurityException) {
+        packageName
+    }
 
     private fun sameLogicalTrack(previous: PlaybackEvent, current: PlaybackEvent): Boolean {
         if (previous.sourcePackageName != current.sourcePackageName) return false
@@ -1019,11 +1413,15 @@ class MediaSessionMonitor(
             previous.normalizedOrNull() == current.normalizedOrNull()
 
     private data class TrackedSession(
+        val sessionKey: String,
+        val generation: Long,
         var controller: MediaController,
-        var callback: MediaController.Callback,
+        val callback: MediaController.Callback,
         var lastMetadataChangedAt: Long,
         var lastPlaybackStateChangedAt: Long,
         var lastObservedAt: Long,
+        var lastPlayingCallbackStateUpdatedAtElapsedMs: Long? = null,
+        var lastPlayingCallbackCoreFingerprint: String? = null,
     )
 
     private data class ActiveResumeRequest(
@@ -1031,34 +1429,21 @@ class MediaSessionMonitor(
         val announcementCycleId: Long?,
         val token: PlaybackPauseToken,
         val callback: (PlaybackRestoreEvent) -> Unit,
-        val initialStateWasPlaying: Boolean,
-        val ownedPauseAcknowledged: Boolean,
-        val sessionRecoveryDeadlineElapsedNanos: Long,
+        var ownedPauseAcknowledged: Boolean,
         @Volatile var playCommandCount: Int = 0,
         @Volatile var commandInFlight: Boolean = false,
-        @Volatile var retryAllowed: Boolean = false,
         @Volatile var lastPlayRequestedAtElapsedNanos: Long = 0L,
-        var pauseIntentCheckGeneration: Long = 0L,
-        var pendingPauseStateUpdatedAtElapsedNanos: Long? = null,
         var playingObserved: Boolean = false,
-        var pausedObservedAfterRequest: Boolean = false,
-        var waitingForSession: Boolean = false,
-        var lastSessionWaitReason: String? = null,
+        var waitingForOwnedPause: Boolean = false,
         var checkGeneration: Long = 0L,
         var completed: Boolean = false,
     )
 
     private data class RestoreSessionCandidate(
+        val sessionKey: String,
         val controller: MediaController,
         val event: PlaybackEvent,
         val match: PlaybackRestoreTrackMatch,
-        val retained: Boolean,
-    )
-
-    private data class RetainedPausedController(
-        val sessionKey: String,
-        val sourcePackageName: String,
-        val controller: MediaController,
     )
 
     private data class PublishedSelection(
@@ -1067,11 +1452,7 @@ class MediaSessionMonitor(
     )
 
     private companion object {
-        const val MAX_PLAY_COMMANDS = 2
         const val PLAY_CONFIRMATION_MS = 300L
-        const val LATE_PAUSE_CONFIRMATION_MS = 500L
-        const val PAUSE_INTENT_CONFIRMATION_MS = 150L
-        const val SESSION_RECOVERY_TIMEOUT_MS = 6_000L
         const val NANOS_PER_MILLISECOND = 1_000_000L
         const val MONITOR_THREAD_CALL_TIMEOUT_MS = 10_000L
     }
@@ -1089,12 +1470,18 @@ data class PlaybackPauseToken(
     val discNumber: Int? = null,
     val queueItemId: Long? = null,
     val pauseRequestedAtElapsedNanos: Long = 0L,
+    /** Exact provider PLAYING callback timestamp captured before TrackTalk PAUSE. */
+    val playbackStateUpdatedAtPauseElapsedNanos: Long? = null,
+    /** Monitor callback sequence already published when TrackTalk issued PAUSE. */
+    val eventSequenceNumberAtPauseCommand: Long = 0L,
+    /** In-memory controller callback generation that accepted TrackTalk's PAUSE. */
+    val controllerGeneration: Long = 0L,
+    /** In-memory monitor lifecycle that issued TrackTalk's PAUSE. */
+    val monitorLifecycleGeneration: Long = 0L,
 )
 
 enum class PlaybackRestoreEventType {
     PLAY_REQUESTED,
-    PLAY_RETRY_REQUESTED,
-    WAITING_FOR_SESSION,
     PLAYING_CONFIRMED,
     CANCELLED,
     FAILED,
@@ -1114,13 +1501,17 @@ data class PlaybackRestoreEvent(
 
 enum class PlaybackRestoreTrackMatch {
     MATCH,
+    METADATA_ENRICHMENT,
     MISMATCH,
     INSUFFICIENT,
 }
 
 object PlaybackRestoreTrackMatcher {
     fun matches(event: PlaybackEvent, token: PlaybackPauseToken): Boolean =
-        classify(event, token) == PlaybackRestoreTrackMatch.MATCH
+        classify(event, token) in setOf(
+            PlaybackRestoreTrackMatch.MATCH,
+            PlaybackRestoreTrackMatch.METADATA_ENRICHMENT,
+        )
 
     /**
      * Capture queue identity only when the queue's reported active item is
@@ -1150,17 +1541,45 @@ object PlaybackRestoreTrackMatcher {
             return PlaybackRestoreTrackMatch.MISMATCH
         }
 
+        val tokenMediaId = token.mediaId.normalizedRestoreIdentity()
+        val eventMediaId = event.mediaId.normalizedRestoreIdentity()
+        if (tokenMediaId != null && eventMediaId != null && tokenMediaId == eventMediaId) {
+            if (!compatibleRestoreText(token.title, event.title)) {
+                return PlaybackRestoreTrackMatch.MISMATCH
+            }
+            if (!compatibleRestoreText(token.artist, event.artist)) {
+                return PlaybackRestoreTrackMatch.MISMATCH
+            }
+            return if (
+                differentRestoreText(token.album, event.album)
+            ) {
+                PlaybackRestoreTrackMatch.METADATA_ENRICHMENT
+            } else {
+                PlaybackRestoreTrackMatch.MATCH
+            }
+        }
+        if (TrackFingerprint.core(event) == token.fingerprint) {
+            return if (differentRestoreText(token.album, event.album)) {
+                PlaybackRestoreTrackMatch.METADATA_ENRICHMENT
+            } else {
+                PlaybackRestoreTrackMatch.MATCH
+            }
+        }
+
+        // A queue item ID is provider projection/occurrence evidence, not core
+        // track identity. YouTube Music can briefly point activeQueueItemId at
+        // the previous queue row while stable title/artist still identify the
+        // paused track. Let an exact core match win, then consult queue identity
+        // only when the provider's current queue row is coherent with its
+        // current metadata.
         val tokenQueueItemId = token.queueItemId
-        val eventQueueItemId = event.activeQueuePosition?.let(event.queue::getOrNull)?.queueItemId
+        val eventQueueItemId = queueItemIdForPause(event)
         if (tokenQueueItemId != null && eventQueueItemId != null && tokenQueueItemId != eventQueueItemId) {
             return PlaybackRestoreTrackMatch.MISMATCH
         }
 
-        val tokenMediaId = token.mediaId.normalizedRestoreIdentity()
-        val eventMediaId = event.mediaId.normalizedRestoreIdentity()
-        if (tokenMediaId != null && eventMediaId != null && tokenMediaId == eventMediaId) {
-            return PlaybackRestoreTrackMatch.MATCH
-        }
+        // Accept tokens created by older in-process callers/tests while the
+        // production pause token now records only core identity.
         if (TrackFingerprint.announcement(event) == token.fingerprint) {
             return PlaybackRestoreTrackMatch.MATCH
         }
@@ -1174,14 +1593,17 @@ object PlaybackRestoreTrackMatcher {
         }
         if (!sameRestoreText(token.title, event.title)) return PlaybackRestoreTrackMatch.MISMATCH
         if (!compatibleRestoreText(token.artist, event.artist)) return PlaybackRestoreTrackMatch.MISMATCH
-        if (!compatibleRestoreText(token.album, event.album)) return PlaybackRestoreTrackMatch.MISMATCH
         if (token.trackNumber != null && event.trackNumber != null && token.trackNumber != event.trackNumber) {
             return PlaybackRestoreTrackMatch.MISMATCH
         }
         if (token.discNumber != null && event.discNumber != null && token.discNumber != event.discNumber) {
             return PlaybackRestoreTrackMatch.MISMATCH
         }
-        return PlaybackRestoreTrackMatch.MATCH
+        return if (differentRestoreText(token.album, event.album)) {
+            PlaybackRestoreTrackMatch.METADATA_ENRICHMENT
+        } else {
+            PlaybackRestoreTrackMatch.MATCH
+        }
     }
 
     private fun sameRestoreText(expected: String?, actual: String?): Boolean =
@@ -1191,6 +1613,9 @@ object PlaybackRestoreTrackMatcher {
         expected.normalizedRestoreIdentity() == null ||
             actual.normalizedRestoreIdentity() == null ||
             expected.normalizedRestoreIdentity() == actual.normalizedRestoreIdentity()
+
+    private fun differentRestoreText(expected: String?, actual: String?): Boolean =
+        expected.normalizedRestoreIdentity() != actual.normalizedRestoreIdentity()
 
     private fun String?.normalizedRestoreIdentity(): String? = this
         ?.trim()

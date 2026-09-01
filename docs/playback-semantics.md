@@ -26,6 +26,18 @@ itself mean a new song.
 
 The selected session has a generation/key. Work scheduled from an old session
 must be rejected once a newer session/package/current track supersedes it.
+The monitor assigns a fresh callback generation whenever it attaches a
+`MediaController`; the framework session key alone is not enough because a
+late callback from a detached controller can share that key with its
+replacement. Metadata, playback, queue, and destruction callbacks must match
+the current generation before they can affect session state, TTS, or restore.
+
+`onSessionDestroyed` invalidates only the matching controller generation and
+then performs one active-session reconciliation to select and synchronize a
+replacement. A disappearing provider session is infrastructure churn, not a
+reason to stop the NotificationListener or erase duplicate history. Failed
+cross-process MediaSession reads, callback registration, and transport commands
+are isolated at that boundary, logged, and reconciled in the same way.
 
 ## Track identity and occurrence
 
@@ -36,11 +48,15 @@ TrackTalk needs two related notions:
 - **Playback occurrence** decides whether a logical track should be announced
   again.
 
-A stable non-empty media ID is strongest. When it is absent or temporarily
-replaced, source package plus compatible title/artist/album, reliable
-track/disc metadata, and the active queue item can bridge only short metadata
-enrichment. Neither artwork nor a transient queue ID is a reason to speak
-again.
+A stable non-empty media ID is strongest. For short-lived ownership and
+duration-preparation state, core identity is separated from display metadata:
+it uses source plus media ID when available, otherwise normalized title and
+artist. Reliable track/disc metadata and a coherent active queue item can
+reject a real replacement. Album, artwork, and other display fields remain
+factual announcement metadata, but an album-only correction while the core
+identity is unchanged is enrichment, not a track change. This narrow rule does
+not make album differences globally interchangeable when core identity is
+missing or conflicting.
 
 The completed announcement guard is deliberately narrower than the pending
 enrichment matcher. It must avoid treating two different tracks with similar
@@ -51,6 +67,14 @@ metadata as the same completed announcement.
 One accepted playback occurrence gets at most one automatic announcement.
 This includes repeated metadata callbacks, pause/resume churn, queue refreshes,
 and late optional metadata.
+
+An unrelated notification being posted or removed is not a playback
+occurrence. Notification-listener reconnect, active-session reconciliation,
+controller replacement, and controller-generation changes likewise preserve
+the current logical-track baseline. Re-observing the same core track through
+any of those infrastructure paths creates no announcement candidate, pause,
+or TTS request. Controller generations remain callback-validity evidence only;
+they are never track identity.
 
 The suppression history is not a historical blacklist. A real sequence
 `A → B → A` is a new occurrence and can announce A again. A repeat-one cycle
@@ -69,47 +93,102 @@ confirmation; a confirmed replacement track proceeds normally, while a stable
 same-track restart remains eligible. This guard validates identity only: it
 does not pause, duck, seek, or otherwise control playback.
 
+Same-track restart eligibility exists only after an explicit `STOPPED`
+snapshot and is scoped to that exact framework session and logical/core track.
+An empty active-session refresh, listener teardown, session replacement, or a
+`STOPPED` snapshot from another media session cannot lend that eligibility to
+the current player. Losing that exact session discards the boundary; it does
+not turn a later same-track baseline into a new occurrence.
+
 ## Owned-pause restore lifecycle
 
-Playback restore is an ownership state machine, not a general attempt to make
-the selected player play again. An obligation exists only after
+Playback restore is an ephemeral ownership lease, not a general attempt to make
+the selected player play again. A lease exists only after
 `MediaSessionMonitor.pauseSelectedIfPlaying` successfully issues a TrackTalk
 pause for the expected playing session and logical track. A user-created
-pause, a provider pause, or focus-only ducking creates no obligation.
+pause, an already paused/stopped player, a provider pause, or focus-only ducking
+creates no lease.
 
-The pause token carries the accepted session/track identity. The controller
-then reserves one restore-cycle ID and binds it to the session generation and
-the speech generation. Only one cycle can be active. Every completion,
-callback, retry, or watchdog action must match that cycle; stale cycles and
-callbacks are ignored rather than applied to whichever player is now selected.
+`PlaybackRestoreLease` is memory-only and records the announcement, monitor,
+logical-session, controller-callback, framework-session, and logical-track
+identities that existed when TrackTalk issued `PAUSE`. It also records that the
+pause command was actually issued by TrackTalk. The lease is never persisted;
+process recreation begins with no playback authority even when duplicate
+history and settings are restored.
+
+The lease independently records `ttsCompleted` and `pauseAcknowledged`.
+A matching current TTS completion/error/interruption (or an immediate
+audio-focus failure in that same transaction) marks only the first condition;
+an attributable post-command `PLAYBACK_STATE` callback carrying `PAUSED` marks
+only the second. Metadata/queue callbacks that merely remap a PAUSED controller
+snapshot cannot acknowledge the command. Their arrival order is irrelevant.
+The lease can grant one restore only after both are true and the speech
+generation, selected session, active source, controller generation, and core
+track identity still match. A stale TTS callback, cancelled delayed
+announcement, watchdog, controller/listener teardown, or lifecycle cleanup
+invalidates the lease without sending `PLAY`.
 
 Replayed states with the same framework update timestamp remain harmless
 controller churn. Once TrackTalk's own pause is acknowledged, an observable
-newer `PLAYING`, `PAUSED`, or `STOPPED` state disqualifies the pending automatic
-restore rather than being overridden by a stale `PLAY` request.
+newer `PLAYING` or `PAUSED` state disqualifies the pending automatic restore.
+`STOPPED` and `NONE` always disqualify it. If a `PAUSED` transition cannot be
+attributed to the pause command carried by the lease, TrackTalk fails safe and
+does not play.
+
+YouTube Music may deliver a real ordered `PLAYING → PAUSED` callback while
+reusing an older `lastPositionUpdateTime`, and a newly selected track may have
+no separate same-track `PLAYING_STATE` callback before TrackTalk pauses it.
+Attribution therefore uses the exact monitor/controller/session/core-track
+identities plus TrackTalk's monotonic callback sequence as command provenance.
+The first exact `PAUSED` playback callback received locally after the pause
+command watermark can acknowledge ownership while the lease remains valid.
+Metadata/queue snapshots and callbacks at or before the command watermark
+cannot. A framework state timestamp after the command or at least a known
+same-track PLAYING callback baseline remains useful evidence; an explicit
+timestamp regression behind that known baseline is rejected. A missing
+baseline, missing source timestamp, or source timestamp merely older than the
+local pause-command time does not by itself veto an otherwise authoritative
+post-command callback.
 
 Metadata and queue callbacks may be mixed or incomplete while a provider
-refreshes its controller. `PlaybackRestoreTrackMatcher` accepts only a
-compatible logical track; a real track/source mismatch cancels the cycle.
-Controller recreation is infrastructure churn, not permission to resume a new
-player: the monitor may retain the exact controller that accepted TrackTalk's
-pause, or wait a bounded time for the same logical session/track to become
-identifiable again.
+refreshes its controller. `PlaybackRestoreTrackMatcher` classifies an
+album-only correction on an unchanged core track as metadata enrichment and
+keeps the exact lease. Raw queue item IDs are auxiliary occurrence evidence:
+an isolated or metadata-incoherent queue-ID mismatch cannot outvote an exact
+core-track match, while a coherent queue change combined with changed provider
+identity can reject a replacement occurrence. A real title/artist, reliable
+identity, coherent occurrence, or source mismatch cancels the lease.
 
-When a matching cycle reaches its TTS outcome, restoration asks the monitor to
-issue the first `PLAY` synchronously. The monitor allows at most one bounded
-retry, only after the same logical track is recovered or a missing callback is
-handled. It does not poll position or play an identity-incomplete session.
-A matching `PLAYING` callback/confirmation completes restoration. A real track
-change, a newer user pause after playback resumes, an identity mismatch, or an
-expired recovery window cancels/fails the cycle rather than overriding user
-intent.
+`MediaSessionManager` may return a new `MediaController` wrapper for the exact
+same framework token during active-session reconciliation. The monitor keeps
+the already registered wrapper and callback generation in that case; no lease
+handoff is needed because playback ownership never changed. A different token,
+session destruction/removal, selected-session change, listener reconnect, or
+monitor generation change still invalidates the lease even if a later
+controller reports the same visible metadata. The monitor never retains or
+rediscovers an invalidated old controller as playback authority.
+
+When TTS finishes before the attributable `PAUSED` update, the lease remains
+pending; a still-`PLAYING` snapshot is neither success nor failure and consumes
+no authority. When `PAUSED` arrives first, the lease waits for TTS. Once both
+conditions hold, the same active controller receives exactly one `PLAY`; there
+is no automatic retry. A matching `PLAYING` callback/confirmation completes
+restoration. If the provider has already returned to `PLAYING` after an owned
+pause, TrackTalk sends no redundant command. A missing session, ambiguous
+state, command failure, later pause, or identity mismatch cancels/fails the
+lease rather than overriding user intent.
+
+The playback quick-settings/UI toggle is a separate explicit user command. Its
+user-requested `PLAY` path first cancels any automatic lease and is never used
+by listener reconnect, process recovery, TTS cleanup, or announcement timers.
 
 The controller also arms a bounded speech-completion watchdog. If Android TTS
-never returns a completion callback, it releases focus and routes the same
-cycle through the guarded restore path; the watchdog is not a second playback
-policy. See [Audio and TTS](audio-tts.md) for the TTS outcomes that feed this
-lifecycle.
+never returns a completion callback, it releases focus and invalidates the
+lease without sending `PLAY`. A late timer is cleanup, never playback authority.
+If TTS is complete but an attributable pause acknowledgement never arrives, a
+separate safety expiry discards the pending lease and likewise sends no
+`PLAY`; it is not the normal synchronization mechanism.
+See [Audio and TTS](audio-tts.md) for the TTS outcomes that feed this lifecycle.
 
 ## Playback context is evidence, not source intent
 
@@ -182,10 +261,23 @@ The app uses a confirmed new current event before speech or music intervention.
 metadata-settlement wait, but immediate reading protects audio immediately.
 
 Duration/position data may support diagnostics and one-shot preparation only.
-A Samsung duration-precision audit found fine-grained repeatable duration
-values, yet transition prediction still had material error; duration precision
-is therefore not a trustworthy authorization to pause or hold media early.
-No high-frequency playback-position polling is permitted.
+When `MediaMetadata.METADATA_KEY_DURATION` is explicitly present and usable,
+TrackTalk may estimate the current position from `PlaybackState.position`,
+`lastPositionUpdateTime`, and playback speed, then enter a short pre-arm window
+near the estimated end. The pre-arm is memory-only and may refresh existing
+next-track metadata/text/voice preparation; it may not speak, request focus,
+duck, pause, resume, or treat duration expiry as a transition.
+
+Each duration timer is tied to monitor generation, controller callback
+generation, selected session, and core current-track identity, so an
+album-only display correction does not create another prediction. Track changes,
+seek/position or speed changes, pause/stop, duration changes, replacement,
+reconnect, and stale callbacks cancel it. Missing, zero/invalid, unusually
+short, or live/indefinite durations stay entirely on the normal reactive
+metadata path. A Samsung duration-precision audit found fine-grained
+repeatable values, yet transition prediction still had material error; duration
+precision is therefore not a trustworthy authorization to pause or hold media
+early. No high-frequency playback-position polling is permitted.
 
 See [Audio and TTS](audio-tts.md) for focus and TTS completion, and
 [Rejected experiments](experiments/rejected-approaches.md) for boundary
