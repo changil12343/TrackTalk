@@ -1,7 +1,86 @@
+import java.util.Properties
+import org.gradle.api.GradleException
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+val releaseSigningPropertiesFile = rootProject.file("keystore.properties")
+val releaseSigningProperties = Properties().apply {
+    if (releaseSigningPropertiesFile.isFile) {
+        releaseSigningPropertiesFile.inputStream().use { load(it) }
+    }
+}
+
+fun releaseSigningValue(propertyName: String, environmentName: String): String? {
+    val localValue = releaseSigningProperties
+        .getProperty(propertyName)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+    return localValue ?: providers
+        .environmentVariable(environmentName)
+        .orNull
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+}
+
+val releaseStoreFilePath = releaseSigningValue(
+    propertyName = "storeFile",
+    environmentName = "TRACKTALK_UPLOAD_STORE_FILE",
+)
+val releaseStorePassword = releaseSigningValue(
+    propertyName = "storePassword",
+    environmentName = "TRACKTALK_UPLOAD_STORE_PASSWORD",
+)
+val releaseKeyAlias = releaseSigningValue(
+    propertyName = "keyAlias",
+    environmentName = "TRACKTALK_UPLOAD_KEY_ALIAS",
+)
+val releaseKeyPassword = releaseSigningValue(
+    propertyName = "keyPassword",
+    environmentName = "TRACKTALK_UPLOAD_KEY_PASSWORD",
+)
+val releaseSigningValues = listOf(
+    releaseStoreFilePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+)
+val releaseSigningInputPresent =
+    releaseSigningPropertiesFile.isFile || releaseSigningValues.any { it != null }
+val releaseSigningConfigured = releaseSigningValues.all { it != null }
+val releaseSigningRequirement = providers
+    .gradleProperty("tracktalk.requireReleaseSigning")
+    .orNull
+    ?.trim()
+    ?.lowercase()
+val requireReleaseSigning = when (releaseSigningRequirement) {
+    null, "", "false" -> false
+    "true" -> true
+    else -> throw GradleException(
+        "tracktalk.requireReleaseSigning must be either true or false.",
+    )
+}
+
+if (releaseSigningInputPresent && !releaseSigningConfigured) {
+    throw GradleException(
+        "Release signing credentials are incomplete. Provide storeFile, " +
+            "storePassword, keyAlias, and keyPassword in keystore.properties " +
+            "or the TRACKTALK_UPLOAD_* environment variables.",
+    )
+}
+if (requireReleaseSigning && !releaseSigningConfigured) {
+    throw GradleException(
+        "Release signing was required, but no complete upload-key credentials " +
+            "were provided.",
+    )
+}
+
+val releaseSigningStoreFile = releaseStoreFilePath?.let { rootProject.file(it) }
+if (releaseSigningConfigured && releaseSigningStoreFile?.isFile != true) {
+    throw GradleException("The configured release-signing keystore does not exist.")
 }
 
 android {
@@ -19,8 +98,22 @@ android {
         vectorDrawables.useSupportLibrary = true
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = checkNotNull(releaseSigningStoreFile)
+                storePassword = checkNotNull(releaseStorePassword)
+                keyAlias = checkNotNull(releaseKeyAlias)
+                keyPassword = checkNotNull(releaseKeyPassword)
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

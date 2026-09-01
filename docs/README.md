@@ -16,8 +16,9 @@ log.
 5. [Device routing and automation](device-routing-automation.md) — route
    resolution, logical devices, and Plus automation.
 6. [UI/UX](ui-ux.md) — navigation, localization, defaults, and permissions.
-7. [Testing](testing.md) and [Beta release](beta-release.md) — validation and
-   release discipline.
+7. [Testing](testing.md), [Beta release](beta-release.md), and
+   [Release signing](release-signing.md) — validation, release discipline, and
+   the credential-free operator handoff for Play signing.
 
 ## Ownership map
 
@@ -31,6 +32,7 @@ log.
 | How are headphones and Bluetooth devices interpreted? | [Device routing and automation](device-routing-automation.md) |
 | What should a new user see? | [UI/UX](ui-ux.md) |
 | Which tests prove a change? | [Testing](testing.md) |
+| How is a Play upload signed without tracking credentials? | [Release signing](release-signing.md) |
 | Which approaches are intentionally not production behavior? | [Rejected experiments](experiments/rejected-approaches.md) |
 
 ## Evidence hierarchy

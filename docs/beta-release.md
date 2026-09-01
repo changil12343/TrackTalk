@@ -55,7 +55,9 @@ rewrite source or wipe user data.
 Before sharing a build, confirm that it contains no keystore, local SDK path,
 device identifier, raw validation log, screenshot, or temporary experimental
 receiver not intended for the recipient. Production release signing and Play
-Console configuration require their own controlled workflow.
+Console configuration require their own controlled workflow. Follow the
+credential-free operator handoff in [Release signing](release-signing.md); an
+unsigned release artifact is a validation output, not a publishable build.
 
 ## Product readiness statement
 

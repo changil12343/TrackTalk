@@ -5,6 +5,15 @@
 # Local Android SDK configuration
 local.properties
 
+# Private Android release-signing material. Upload keystores should live
+# outside the repository; these rules are a final guard against accidental
+# staging if one is copied into the workspace.
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+local-signing.properties
+
 # Android Studio / IntelliJ
 .idea/
 *.iml
