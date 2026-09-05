@@ -102,6 +102,11 @@ not turn a later same-track baseline into a new occurrence.
 
 ## Owned-pause restore lifecycle
 
+The automatic-announcement planner supports Keep, semantic system duck (the
+default), and user-selected Pause-and-restore. Keep and system duck issue no
+transport commands and create no restore lease. A saved `MusicTreatment.PAUSE`
+remains Pause after reload; only that selected mode enters the lifecycle below.
+
 Playback restore is an ephemeral ownership lease, not a general attempt to make
 the selected player play again. A lease exists only after
 `MediaSessionMonitor.pauseSelectedIfPlaying` successfully issues a TrackTalk
@@ -134,6 +139,13 @@ newer `PLAYING` or `PAUSED` state disqualifies the pending automatic restore.
 `STOPPED` and `NONE` always disqualify it. If a `PAUSED` transition cannot be
 attributed to the pause command carried by the lease, TrackTalk fails safe and
 does not play.
+
+TrackTalk cancels automatic restoration when a newer playback intent can be
+observed. Redundant pause commands issued while the source is already paused
+may not generate an observable MediaSession state change. This is an
+**unobservable idempotent command limitation**, not new playback authority:
+without a newer observable event, the existing valid owned-pause lease may
+still restore exactly once.
 
 YouTube Music may deliver a real ordered `PLAYING → PAUSED` callback while
 reusing an older `lastPositionUpdateTime`, and a newly selected track may have

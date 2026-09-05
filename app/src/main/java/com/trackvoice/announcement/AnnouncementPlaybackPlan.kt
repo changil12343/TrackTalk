@@ -1,7 +1,6 @@
 package com.trackvoice.announcement
 
 import com.trackvoice.data.MusicTreatment
-import com.trackvoice.data.TrackStartBehavior
 import com.trackvoice.data.UserSettings
 
 enum class MusicAttenuationStrategy {
@@ -20,17 +19,10 @@ data class AnnouncementPlaybackPlan(
 
 object AnnouncementPlaybackPlanner {
     fun plan(settings: UserSettings): AnnouncementPlaybackPlan {
-        // "곡명 안내 후 재생" is itself the pause-until-speech-finishes mode.
-        // Keep it consistent even for settings saved by an older build.
-        val treatment = when (settings.trackStartBehavior) {
-            TrackStartBehavior.ANNOUNCE_THEN_PLAY -> MusicTreatment.PAUSE
-            TrackStartBehavior.PLAY_IMMEDIATELY -> settings.musicTreatment.takeUnless {
-                it == MusicTreatment.PAUSE
-            } ?: MusicTreatment.DUCK
-        }
+        val treatment = settings.musicTreatment
         return AnnouncementPlaybackPlan(
             musicTreatment = treatment,
-            pauseBeforeAnnouncement = settings.trackStartBehavior == TrackStartBehavior.ANNOUNCE_THEN_PLAY,
+            pauseBeforeAnnouncement = treatment == MusicTreatment.PAUSE,
             requestAudioFocus = treatment != MusicTreatment.KEEP,
             shouldDuckMusic = treatment == MusicTreatment.DUCK,
             musicAttenuationStrategy = when (treatment) {

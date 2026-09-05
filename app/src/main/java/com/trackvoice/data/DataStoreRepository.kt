@@ -486,15 +486,12 @@ class DataStoreRepository(private val context: Context) {
     }
 
     private fun Preferences.toUserSettings(): UserSettings {
-        val trackStartBehavior = enumOrDefault(this[Keys.trackStartBehavior], TrackStartBehavior.PLAY_IMMEDIATELY)
+        val storedTrackStartBehavior = enumOrDefault(
+            this[Keys.trackStartBehavior],
+            TrackStartBehavior.PLAY_IMMEDIATELY,
+        )
         val storedMusicTreatment = this[Keys.musicTreatment]?.let { enumOrDefault(it, MusicTreatment.DUCK) }
             ?: if (this[Keys.pauseMusicDuringAnnouncement] ?: false) MusicTreatment.PAUSE else MusicTreatment.DUCK
-        val musicTreatment = when (trackStartBehavior) {
-            TrackStartBehavior.ANNOUNCE_THEN_PLAY -> MusicTreatment.PAUSE
-            TrackStartBehavior.PLAY_IMMEDIATELY -> storedMusicTreatment.takeUnless {
-                it == MusicTreatment.PAUSE
-            } ?: MusicTreatment.DUCK
-        }
         val albumMode = enumOrDefault(this[Keys.albumMode], AnnouncementMode.ALBUM)
         val playlistMode = enumOrDefault(this[Keys.playlistMode], AnnouncementMode.PLAYLIST)
         val algorithmMode = enumOrDefault(this[Keys.algorithmMode], AnnouncementMode.TITLE_AND_ARTIST)
@@ -513,10 +510,10 @@ class DataStoreRepository(private val context: Context) {
                 ),
             ),
             bluetoothOnlyForAutoEnable = this[Keys.bluetoothOnlyForAutoEnable] ?: false,
-            musicTreatment = musicTreatment,
+            musicTreatment = storedMusicTreatment,
             musicDuckPercent = (this[Keys.musicDuckPercent] ?: DEFAULT_MUSIC_DUCK_PERCENT)
                 .coerceIn(MIN_MUSIC_DUCK_PERCENT, MAX_MUSIC_DUCK_PERCENT),
-            trackStartBehavior = trackStartBehavior,
+            trackStartBehavior = storedTrackStartBehavior,
             showStatusNotification = this[Keys.showStatusNotification] ?: true,
             timing = timing,
             delaySeconds = AnnouncementTimingPolicy.normalizeStoredDelaySeconds(

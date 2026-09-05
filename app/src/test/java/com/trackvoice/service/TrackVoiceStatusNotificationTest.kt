@@ -16,7 +16,7 @@ import org.junit.Test
 
 class TrackVoiceStatusNotificationTest {
     @Test
-    fun onCollapsedStateUsesEligibleAppFieldOrderAndAnnounceThenPlay() {
+    fun onCollapsedStateReflectsDuckPlaybackPlan() {
         val status = status(
             settings = settings(
                 defaultReadFields = listOf(
@@ -35,7 +35,7 @@ class TrackVoiceStatusNotificationTest {
                     AnnouncementReadField.TITLE,
                     AnnouncementReadField.ARTIST,
                 ),
-                behavior = StatusNotificationBehavior.ANNOUNCE_THEN_PLAY,
+                behavior = StatusNotificationBehavior.DUCK_MUSIC,
             ),
             status.detail,
         )
@@ -118,9 +118,18 @@ class TrackVoiceStatusNotificationTest {
             status(settings = settings(musicTreatment = MusicTreatment.DUCK)).active().behavior,
         )
         assertEquals(
-            StatusNotificationBehavior.ANNOUNCE_THEN_PLAY,
+            StatusNotificationBehavior.DUCK_MUSIC,
             status(
                 settings = settings(trackStartBehavior = TrackStartBehavior.ANNOUNCE_THEN_PLAY),
+            ).active().behavior,
+        )
+        assertEquals(
+            StatusNotificationBehavior.ANNOUNCE_THEN_PLAY,
+            status(
+                settings = settings(
+                    musicTreatment = MusicTreatment.PAUSE,
+                    trackStartBehavior = TrackStartBehavior.PLAY_IMMEDIATELY,
+                ),
             ).active().behavior,
         )
     }

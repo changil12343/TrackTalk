@@ -66,6 +66,11 @@ same-song repeat control, device/state automation, and future advanced
 convenience features. Runtime entitlement must remain synchronized with what
 the UI permits.
 
+Automatic announcements use Android semantic system duck by default. Keep
+leaves music unchanged; user-selected Pause-and-restore uses the existing
+owned-pause lifecycle. All three options remain available under the existing
+entitlement rules, and saved Pause settings are preserved on reload.
+
 Ads are intentionally deferred from the beta. If added later, they must never
 interrupt TTS, a track transition, the global toggle, background service, or
 notification/Quick Settings interaction.

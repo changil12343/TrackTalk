@@ -1096,34 +1096,30 @@ internal fun GeneralSettingsScreen(
         item {
             SettingCard(strings.trackGuide) {
                 if (isPremium) {
-                    OptionDropdown(strings.trackStart, settings.trackStartBehavior, TrackStartBehavior.values().toList(), strings::trackStartBehavior) { value ->
-                        onUpdate { current ->
-                            current.copy(
-                                trackStartBehavior = value,
-                                musicTreatment = when (value) {
-                                    TrackStartBehavior.ANNOUNCE_THEN_PLAY -> MusicTreatment.PAUSE
-                                    TrackStartBehavior.PLAY_IMMEDIATELY -> current.musicTreatment.takeUnless {
-                                        it == MusicTreatment.PAUSE
-                                    } ?: MusicTreatment.DUCK
-                                },
+                    val treatment = settings.musicTreatment
+                    val treatmentSummary = when (treatment) {
+                        MusicTreatment.PAUSE -> strings.announceThenPlaySummary
+                        MusicTreatment.DUCK -> strings.musicVolumeSummary
+                        MusicTreatment.KEEP -> strings.musicKeepSummary
+                    }
+                    OptionDropdown(
+                        strings.musicDuringGuide,
+                        treatment,
+                        listOf(MusicTreatment.KEEP, MusicTreatment.DUCK, MusicTreatment.PAUSE),
+                        strings::musicTreatment,
+                    ) { value ->
+                        onUpdate {
+                            it.copy(
+                                trackStartBehavior = TrackStartBehavior.PLAY_IMMEDIATELY,
+                                musicTreatment = value,
                             )
                         }
                     }
-                    if (settings.trackStartBehavior != TrackStartBehavior.ANNOUNCE_THEN_PLAY) {
-                        val visibleTreatment = settings.musicTreatment.takeUnless { it == MusicTreatment.PAUSE }
-                            ?: MusicTreatment.DUCK
-                        OptionDropdown(
-                            strings.musicDuringGuide,
-                            visibleTreatment,
-                            listOf(MusicTreatment.KEEP, MusicTreatment.DUCK),
-                            strings::musicTreatment,
-                        ) { value -> onUpdate { it.copy(musicTreatment = value) } }
-                        Text(
-                            strings.musicVolumeSummary,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    Text(
+                        treatmentSummary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     val timingOptions = listOf(
                         AnnouncementTiming.IMMEDIATE,
                         AnnouncementTiming.DELAYED,
@@ -1149,14 +1145,12 @@ internal fun GeneralSettingsScreen(
                         ) { value ->
                             onUpdate { it.copy(delaySeconds = value.toInt()) }
                         }
-                        if (settings.trackStartBehavior != TrackStartBehavior.ANNOUNCE_THEN_PLAY) {
-                            SliderSetting(
-                                strings.minimumPlayback,
-                                settings.minimumPlaybackSeconds.toFloat(),
-                                0f..60f,
-                                { value -> strings.seconds(value.toInt()) },
-                            ) { value -> onUpdate { it.copy(minimumPlaybackSeconds = value.toInt()) } }
-                        }
+                        SliderSetting(
+                            strings.minimumPlayback,
+                            settings.minimumPlaybackSeconds.toFloat(),
+                            0f..60f,
+                            { value -> strings.seconds(value.toInt()) },
+                        ) { value -> onUpdate { it.copy(minimumPlaybackSeconds = value.toInt()) } }
                     }
                     SettingSwitchRow(strings.repeatTrack, strings.repeatTrackSummary, settings.allowRepeatAnnouncements) { enabled ->
                         onUpdate { current -> current.copy(allowRepeatAnnouncements = enabled) }

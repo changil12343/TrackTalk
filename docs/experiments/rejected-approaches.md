@@ -26,8 +26,9 @@ behavior.
   as a possible boundary shortcut, not adopted as an extra production path.
 - Focus success does not prove that a provider becomes inaudible sooner or
   restores more reliably than the scoped transport pause.
-- Keep the single reactive Fast Pause flow unless new measured evidence and
-  listening acceptance justify a deliberate redesign.
+- Do not combine system duck with a transport pause. The default uses the
+  existing standalone system-duck path; user-selected Pause uses the separate
+  existing owned-pause lifecycle, not an additional duck-before-pause shortcut.
 
 ## Fixed pre-boundary guards
 

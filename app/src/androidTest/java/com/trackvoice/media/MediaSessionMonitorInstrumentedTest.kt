@@ -193,6 +193,17 @@ class MediaSessionMonitorInstrumentedTest {
         monitor.start()
         try {
             waitUntil { latest.get()?.selected?.event?.title == "Delayed Resume Test" }
+            // INITIAL selection can precede queued bootstrap PLAYING callbacks.
+            // Establish and drain the Track-A callback baseline before emitting
+            // the metadata-only Track-B transition required by this scenario.
+            setState(PlaybackState.STATE_PLAYING)
+            waitUntil {
+                latest.get()?.let { update ->
+                    update.eventType == MediaEventType.PLAYBACK_STATE &&
+                        update.selected?.event?.title == "Delayed Resume Test"
+                } == true
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
 
             // Track B arrives through metadata while the controller's current
             // snapshot is already PLAYING. No Track-B PLAYING_STATE callback is

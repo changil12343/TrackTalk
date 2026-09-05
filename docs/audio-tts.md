@@ -29,13 +29,17 @@ music behavior:
 
 | User intent | Planner result |
 | --- | --- |
-| Play immediately + Keep | No focus, no attenuation. |
-| Play immediately + Lower music | System duck/focus; no direct media-volume write. |
-| Announce then play | Scoped MediaSession pause plus transient focus; restore lifecycle is owned by [Playback semantics](playback-semantics.md). |
+| Keep playing | No focus, no attenuation, no transport commands. |
+| System duck (default) | System duck/focus; no transport commands or direct media-volume write. |
+| Pause and restore | Reactive owned pause, TTS, then one lease-authorized restore if still valid. |
 
-Legacy saved `PAUSE` treatment is normalized away from immediate play. The
-normal duck path never mutates `STREAM_MUSIC`; `LegacyMusicVolumeRecovery`
-exists solely to recover a stale direct mutation written by old builds.
+All three music-treatment options remain selectable under the existing
+entitlement rules. Saved `MusicTreatment.PAUSE` is preserved; fresh settings
+default to Duck. Keep and Duck never create a restore lease. Pause uses the
+existing ownership and observable-intent rules in
+[Playback semantics](playback-semantics.md#owned-pause-restore-lifecycle).
+The normal duck path never mutates `STREAM_MUSIC`;
+`LegacyMusicVolumeRecovery` exists solely to recover a stale direct mutation written by old builds.
 `DeviceVolumeManager` is a separate explicit device-volume feature and must not
 be repurposed as ordinary ducking.
 
@@ -56,8 +60,8 @@ speech watchdog, and pause-acknowledgement safety expiry invalidate the lease
 without playback. The authoritative identity and user-intent rules are in
 [Playback semantics](playback-semantics.md).
 
-The production baseline is reactive **Fast Pause** after a genuinely confirmed
-current track. It is intentionally not an early predicted pause, rewind, or
+The selected Pause mode uses reactive **Fast Pause** after a genuinely
+confirmed current track. It is not an early predicted pause, rewind, or
 synthetic gap. See [Rejected experiments](experiments/rejected-approaches.md).
 
 ## TTS execution
@@ -113,8 +117,9 @@ Automated checks must cover focus request/abandon, audio attributes, exact TTS
 gain mapping, and success/error/cancellation outcome propagation. Restore
 ownership, pause-token matching, and stale-event rejection are covered by
 [Playback semantics](playback-semantics.md). Real-device listening still must
-compare no music, Keep, duck, and announce-then-play cases at the selected
-voice/music levels.
+compare no music, Keep, and system-duck cases at the selected voice/music
+levels. Automatic system-duck acceptance additionally verifies that the source
+remains `PLAYING` and receives no TrackTalk transport command.
 
 For route decisions see [Device routing and automation](device-routing-automation.md);
 for full commands and evidence classification see [Testing](testing.md).

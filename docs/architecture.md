@@ -22,8 +22,7 @@ NotificationListenerService
   → memory-only duration pre-arm (preparation only)
   → AnnouncementPolicy + AnnouncementFormatter
   → duplicate / pending / route eligibility checks
-  → audio preparation + TtsEngine
-  → optional owned-pause restore
+  → AnnouncementPlaybackPlanner (Keep / default system duck / owned pause) + TtsEngine
 ```
 
 The controller is the orchestration boundary. It owns pending announcement
@@ -42,7 +41,7 @@ not recreate those decisions independently.
 | Metadata mapping | `media/TrackMetadataMapper` | Normalizes metadata, queue descriptions, IDs, durations, and reliable track-number provenance. |
 | Playback semantics | `media/PlaybackEvent`, `TemporalPlaybackContextResolver`, `NextTrackPrefetch` | Represents a snapshot, conservative context evidence, metadata-only preparation. |
 | Announcement decision | `announcement/AnnouncementPolicy`, `AnnouncementFormatter` | Applies settings/eligibility and builds the exact spoken text. |
-| Duplicate/restore state | `DuplicateSuppressor`, `PlaybackRestoreLease`, `PlaybackRestoreObligation` | Prevents callback churn from speaking twice and permits one exact, memory-only owned-pause restore only after independent TTS-terminal and pause-acknowledgement conditions. |
+| Duplicate/restore state | `DuplicateSuppressor`, `PlaybackRestoreLease`, `PlaybackRestoreObligation` | Prevents callback churn from speaking twice. Selected Pause mode permits one exact, memory-only owned-pause restore only after independent TTS-terminal and pause-acknowledgement conditions. Keep and default system duck create no lease. |
 | Audio/TTS | `TtsEngine`, `AudioFocusManager`, `TrackTalkAudioAttributes` | Selects Android voices, speaks text, and uses semantic focus/attributes. |
 | Route/device model | `AudioOutputDetector`, `AudioDeviceMonitor`, `LogicalAudioDevice` | Separates the active media route from connected-device inventory. |
 | Persistence | `data/DataStoreRepository`, `SettingsModels` | Stores settings, safe migrations, app eligibility, cached metadata, and persisted duplicate state. |

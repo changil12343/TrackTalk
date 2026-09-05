@@ -52,7 +52,7 @@ class TrackVoiceStatusNotificationInstrumentedTest {
         val notification = StatusNotificationRenderer(context).build(status)
 
         assertEquals("TrackTalk 켜짐", copy.title)
-        assertEquals("YouTube Music · 곡명 → 아티스트 · 안내 후 재생", copy.collapsedText)
+        assertEquals("YouTube Music · 곡명 → 아티스트 · 음량을 줄이고 안내", copy.collapsedText)
         assertEquals("soundcore Space One Pro · 외부 오디오", copy.expandedText)
         assertEquals("안내 끄기", copy.actionLabel)
         assertFalse(copy.collapsedText.contains("Never show this song title"))
@@ -68,6 +68,23 @@ class TrackVoiceStatusNotificationInstrumentedTest {
         assertEquals("안내 끄기", notification.actions?.single()?.title?.toString())
         assertNotNull(notification.contentIntent)
         assertNotNull(notification.actions?.single()?.actionIntent)
+    }
+
+    @Test
+    fun koreanCollapsedStateUsesPauseModeWordingWhenPauseEnabled() {
+        val status = status(
+            settings = settings(
+                appLanguage = AppLanguage.KOREAN,
+                musicTreatment = MusicTreatment.PAUSE,
+                defaultReadFields = listOf(
+                    AnnouncementReadField.TITLE,
+                    AnnouncementReadField.ARTIST,
+                ),
+            ),
+        )
+        val copy = StatusNotificationRenderer(context).copyFor(status)
+
+        assertEquals("YouTube Music · 곡명 → 아티스트 · 안내 후 재생", copy.collapsedText)
     }
 
     @Test

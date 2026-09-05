@@ -464,8 +464,12 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
     fun musicTreatment(treatment: MusicTreatment): String = when (treatment) {
         MusicTreatment.KEEP -> t("그대로 재생", "Keep music playing")
         MusicTreatment.DUCK -> t("음량 줄이기", "Reduce music volume")
-        MusicTreatment.PAUSE -> t("일시정지", "Pause")
+        MusicTreatment.PAUSE -> t("일시정지 후 안내", "Pause during announcement")
     }
+    val musicKeepSummary: String get() = t(
+        "안내 중 음악은 바뀌지 않습니다.",
+        "Music volume and playback are left unchanged during announcements.",
+    )
 
     fun trackStartBehavior(behavior: TrackStartBehavior): String = when (behavior) {
         TrackStartBehavior.PLAY_IMMEDIATELY -> t("음악과 함께 안내", "Announce over music")

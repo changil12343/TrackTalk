@@ -57,17 +57,28 @@ When changing playback behavior, retain or add coverage for:
 - stale pending/prepared work after quick next/previous or session replacement;
 - direct player track number versus queue index rejection;
 - route transition/retry and external-only policy;
+- all three automatic-announcement modes: Keep and system duck produce one
+  TTS, zero `PAUSE`, zero restore leases, zero automatic `PLAY`, and final
+  authoritative `PLAYING`; selected Pause produces one owned `PAUSE`, a valid
+  acknowledged lease, TTS, and exactly one valid restore. Saved
+  `MusicTreatment.PAUSE` survives reload; a fresh default remains Duck;
 - owned pause restore in both event orders (`PAUSED` before TTS and TTS before
   a delayed `PAUSED`), a provider callback that reuses the pre-command PLAYING
   timestamp, a new track with no same-track PLAYING callback baseline whose
   post-command PAUSED source timestamp predates the local pause command,
   metadata/queue PAUSED remaps that must not acknowledge early,
   missing/stale pause acknowledgement expiring with zero `PLAY`, user
-  pause/stop, stale TTS completion, process recovery without a lease, exactly
+  observable newer pause/stop, stale TTS completion, process recovery without a lease, exactly
   one legitimate `PLAY`, and zero retry/resurrection after controller/session/
   listener invalidation. Device validation waits for the bounded final
   authoritative state: a stale post-`PLAY` PAUSED callback followed by PLAYING
   is diagnostic-only, while a genuine final PAUSED state fails restore;
+- observable newer playback intent cancels restoration with zero `PLAY`.
+  A redundant external pause while the source is already paused may publish
+  no new state/callback; do not require TrackTalk to identify an unexposed
+  command. Classify that case separately under the
+  [platform observability limitation](playback-semantics.md#owned-pause-restore-lifecycle),
+  retaining the existing valid owned-restore semantics;
 - immediate policy forcing delay/minimum playback to zero;
 - preserved explicit TTS volume and fresh 80% default;
 - global beta-visible field ordering/toggle/drag behavior.

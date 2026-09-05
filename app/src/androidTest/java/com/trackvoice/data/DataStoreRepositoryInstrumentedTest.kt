@@ -238,6 +238,28 @@ class DataStoreRepositoryInstrumentedTest {
     }
 
     @Test
+    fun explicitPauseSettingsArePersistedWithoutNormalization() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = DataStoreRepository(context)
+        val original = repository.currentUserSettings()
+
+        try {
+            repository.updateUserSettings { current ->
+                current.copy(
+                    trackStartBehavior = TrackStartBehavior.ANNOUNCE_THEN_PLAY,
+                    musicTreatment = MusicTreatment.PAUSE,
+                )
+            }
+
+            val recreated = DataStoreRepository(context).currentUserSettings()
+            assertEquals(TrackStartBehavior.ANNOUNCE_THEN_PLAY, recreated.trackStartBehavior)
+            assertEquals(MusicTreatment.PAUSE, recreated.musicTreatment)
+        } finally {
+            repository.updateUserSettings { original }
+        }
+    }
+
+    @Test
     fun legacyAppAnnouncementMigrationKeepsTheAppEligibilityOverride() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val repository = DataStoreRepository(context)

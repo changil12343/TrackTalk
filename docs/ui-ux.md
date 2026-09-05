@@ -76,6 +76,11 @@ the inapplicable controls are hidden. Detailed timing, speed, pitch, voice
 volume, music attenuation, repeat behavior, and automation remain Plus
 controls where runtime entitlement applies.
 
+The music-during-announcement control exposes Keep, Lower music (the default),
+and Pause then announce under the existing entitlement rules. A saved
+`MusicTreatment.PAUSE` remains selected after reload. Platform observability
+limits are documented in playback semantics, not added as a separate UI warning.
+
 ## Apps and devices
 
 Apps are grouped by category for scanning, but their individual setting is

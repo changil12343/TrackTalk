@@ -364,6 +364,16 @@ data class UserSettings(
     val deviceVolumePercent: Int = 90,
 )
 
+/**
+ * v1 automatic announcements never take transport ownership from the source player.
+ * Keep all explicit values readable so legacy `PAUSE`/`TRACK` settings are
+ * restored exactly as configured by users. Transport ownership is controlled by
+ * the playback planner, not by this persistence transform.
+ */
+internal fun UserSettings.normalizedForAutomaticAnnouncementPlayback(): UserSettings {
+    return this
+}
+
 data class AudioDeviceSettings(
     val deviceKey: String,
     val displayName: String,

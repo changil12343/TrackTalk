@@ -19,6 +19,7 @@ import com.trackvoice.data.AnnouncementOutputPolicy
 import com.trackvoice.data.AnnouncementReadField
 import com.trackvoice.data.AnnouncementTiming
 import com.trackvoice.data.AppSettings
+import com.trackvoice.data.MusicTreatment
 import com.trackvoice.data.PersistedAnnouncement
 import com.trackvoice.data.TrackStartBehavior
 import com.trackvoice.data.UserSettings
@@ -33,27 +34,24 @@ import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Emulator-only integration harness for the transition-critical path.
+ * Emulator-only integration harness for the v1 automatic-announcement path.
  *
  * It drives a real framework MediaSession, exposes the next queue item before
- * each transition, and records when the player receives TrackTalk's PAUSE.
- * The production TrackTalk.Validation events provide the precise monotonic
- * T0..T8 breakdown; this harness verifies the external command ordering and
- * supplies a repeatable end-to-end latency sample.
+ * each transition, and verifies that even legacy pause settings cannot make
+ * TrackTalk send transport commands in the expected mode-specific way. Owned-pause
+ * restoration remains covered independently by MediaSessionMonitor and
+ * PlaybackRestoreObligation tests.
  */
 @RunWith(AndroidJUnit4::class)
 class AnnounceThenPlayLatencyInstrumentedTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
     private val app = context.applicationContext as TrackVoiceApplication
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val transitionStartedAtNanos = AtomicLong(0L)
     private val pauseCount = AtomicInteger(0)
-    private val pauseLatenciesMs = CopyOnWriteArrayList<Double>()
+    private val playCount = AtomicInteger(0)
 
     private lateinit var session: MediaSession
     private lateinit var controller: TrackVoiceController
@@ -95,6 +93,7 @@ class AnnounceThenPlayLatencyInstrumentedTest {
                 enabled = false,
                 outputPolicy = AnnouncementOutputPolicy.ALL_OUTPUTS,
                 trackStartBehavior = TrackStartBehavior.ANNOUNCE_THEN_PLAY,
+                musicTreatment = MusicTreatment.KEEP,
                 timing = AnnouncementTiming.IMMEDIATE,
                 delaySeconds = 0,
                 minimumPlaybackSeconds = 0,
@@ -116,15 +115,12 @@ class AnnounceThenPlayLatencyInstrumentedTest {
         session = MediaSession(context, "TrackTalkAnnounceThenPlayLatency")
         session.setCallback(object : MediaSession.Callback() {
             override fun onPause() {
-                val receivedAtNanos = SystemClock.elapsedRealtimeNanos()
-                transitionStartedAtNanos.get().takeIf { it > 0L }?.let { startedAt ->
-                    pauseLatenciesMs += (receivedAtNanos - startedAt).coerceAtLeast(0L) / 1_000_000.0
-                }
                 pauseCount.incrementAndGet()
                 setPlaybackState(PlaybackState.STATE_PAUSED, currentQueueId())
             }
 
             override fun onPlay() {
+                playCount.incrementAndGet()
                 setPlaybackState(PlaybackState.STATE_PLAYING, currentQueueId())
             }
         }, mainHandler)
@@ -141,17 +137,11 @@ class AnnounceThenPlayLatencyInstrumentedTest {
         waitUntil(timeoutMs = 10_000L) {
             controller.ttsState.value.status == TtsStatus.READY
         }
-        app.repository.updateUserSettings { it.copy(enabled = true) }
-        waitUntil {
-            controller.userSettings.value.enabled &&
-                controller.userSettings.value.trackStartBehavior == TrackStartBehavior.ANNOUNCE_THEN_PLAY
-        }
         SystemClock.sleep(250L)
     }
 
     @After
     fun tearDown() = runBlocking {
-        transitionStartedAtNanos.set(0L)
         if (::session.isInitialized) {
             session.isActive = false
             session.release()
@@ -172,42 +162,206 @@ class AnnounceThenPlayLatencyInstrumentedTest {
     }
 
     @Test
-    fun prefetchedTransitionsPauseBeforeSpeechWithoutDuplicateCommands() {
+    fun automaticAnnouncementsKeepPlayingDoesNotIssueTransportCommands() {
+        val expectedPausePerTransition = 0
+        val expectedPlayPerTransition = 0
+        configureAndEnableAnnouncementMode(MusicTreatment.KEEP)
         val playerController = MediaController(context, session.sessionToken)
+        var previousAnnouncementAt = controller.diagnostics.value.lastAnnouncementAt ?: 0L
+        var completedAnnouncements = 0
 
         for (index in 1 until TRACKS.size) {
-            val expectedPauseCount = index
-            transitionStartedAtNanos.set(SystemClock.elapsedRealtimeNanos())
             publishTrack(index)
 
-            waitUntil(timeoutMs = 3_000L) { pauseCount.get() >= expectedPauseCount }
-            assertEquals("one PAUSE command per logical transition", expectedPauseCount, pauseCount.get())
-            // The callback increments pauseCount immediately before the new
-            // framework state becomes visible through MediaController. Observe
-            // PAUSED first so a stale PLAYING snapshot cannot advance the loop
-            // while the preceding announcement still owns the pause token.
-            waitUntil(timeoutMs = 3_000L) {
-                playerController.playbackState?.state == PlaybackState.STATE_PAUSED
-            }
-            waitUntil(timeoutMs = 8_000L) {
-                playerController.playbackState?.state == PlaybackState.STATE_PLAYING
-            }
             waitUntil(timeoutMs = 3_000L) {
                 controller.mediaState.value.currentEvent?.mediaId == TRACKS[index].mediaId
             }
-            SystemClock.sleep(120L)
+            waitUntil(timeoutMs = 8_000L) {
+                val diagnostics = controller.diagnostics.value
+                diagnostics.lastAnnouncementAt?.let { it > previousAnnouncementAt } == true &&
+                    diagnostics.lastAnnouncementSucceeded == true
+            }
+            previousAnnouncementAt = requireNotNull(controller.diagnostics.value.lastAnnouncementAt)
+            completedAnnouncements += 1
+
+            assertEquals(
+                "keep playing should never pause",
+                expectedPausePerTransition * completedAnnouncements,
+                pauseCount.get(),
+            )
+            assertEquals(
+                "keep playing should never play",
+                expectedPlayPerTransition * completedAnnouncements,
+                playCount.get(),
+            )
+            assertEquals(PlaybackState.STATE_PLAYING, playerController.playbackState?.state)
         }
 
-        assertEquals(TRANSITION_COUNT, pauseLatenciesMs.size)
-        val sorted = pauseLatenciesMs.sorted()
-        val median = percentile(sorted, 0.50)
-        val p95 = percentile(sorted, 0.95)
+        assertEquals(TRANSITION_COUNT, completedAnnouncements)
+        assertEquals(
+            "keep playing should emit zero pause commands",
+            0,
+            pauseCount.get(),
+        )
+        assertEquals(
+            "keep playing should emit zero play commands",
+            0,
+            playCount.get(),
+        )
         Log.i(
             LATENCY_TAG,
-            "ANNOUNCE_THEN_PLAY_LATENCY transitions=$TRANSITION_COUNT " +
-                "medianPauseCallbackMs=$median p95PauseCallbackMs=$p95 samples=${sorted.joinToString(",")}",
+            "KEEP_PLAYING transitions=$TRANSITION_COUNT " +
+                "ttsCompleted=$completedAnnouncements pause=${pauseCount.get()} play=${playCount.get()} " +
+                "finalState=${playerController.playbackState?.state}",
         )
-        assertTrue("PAUSE callback p95 should remain bounded on the emulator: $p95 ms", p95 < 1_000.0)
+    }
+
+    @Test
+    fun automaticAnnouncementsSystemDuckWithoutTransportCommands() {
+        val expectedPausePerTransition = 0
+        val expectedPlayPerTransition = 0
+        configureAndEnableAnnouncementMode(MusicTreatment.DUCK)
+        val playerController = MediaController(context, session.sessionToken)
+        var previousAnnouncementAt = controller.diagnostics.value.lastAnnouncementAt ?: 0L
+        var completedAnnouncements = 0
+
+        for (index in 1 until TRACKS.size) {
+            publishTrack(index)
+
+            waitUntil(timeoutMs = 3_000L) {
+                controller.mediaState.value.currentEvent?.mediaId == TRACKS[index].mediaId
+            }
+            waitUntil(timeoutMs = 8_000L) {
+                val diagnostics = controller.diagnostics.value
+                diagnostics.lastAnnouncementAt?.let { it > previousAnnouncementAt } == true &&
+                    diagnostics.lastAnnouncementSucceeded == true
+            }
+            previousAnnouncementAt = requireNotNull(controller.diagnostics.value.lastAnnouncementAt)
+            completedAnnouncements += 1
+
+            assertEquals(
+                "system duck should never pause",
+                expectedPausePerTransition * completedAnnouncements,
+                pauseCount.get(),
+            )
+            assertEquals(
+                "system duck should never play",
+                expectedPlayPerTransition * completedAnnouncements,
+                playCount.get(),
+            )
+            assertEquals(PlaybackState.STATE_PLAYING, playerController.playbackState?.state)
+        }
+
+        assertEquals(TRANSITION_COUNT, completedAnnouncements)
+        assertEquals(
+            "system duck should emit zero pause commands",
+            0,
+            pauseCount.get(),
+        )
+        assertEquals(
+            "system duck should emit zero play commands",
+            0,
+            playCount.get(),
+        )
+        Log.i(
+            LATENCY_TAG,
+            "SYSTEM_DUCK transitions=$TRANSITION_COUNT " +
+                "ttsCompleted=$completedAnnouncements pause=${pauseCount.get()} play=${playCount.get()} " +
+                "finalState=${playerController.playbackState?.state}",
+        )
+    }
+
+    @Test
+    fun automaticAnnouncementsPauseThenPlayIssuesCommandsExactlyOnce() {
+        val expectedPausePerTransition = 1
+        val expectedPlayPerTransition = 1
+        configureAndEnableAnnouncementMode(MusicTreatment.PAUSE)
+        val playerController = MediaController(context, session.sessionToken)
+        var previousAnnouncementAt = controller.diagnostics.value.lastAnnouncementAt ?: 0L
+        var completedAnnouncements = 0
+
+        for (index in 1 until TRACKS.size) {
+            publishTrack(index)
+
+            waitUntil(timeoutMs = 3_000L) {
+                controller.mediaState.value.currentEvent?.mediaId == TRACKS[index].mediaId
+            }
+            waitUntil(timeoutMs = 8_000L) {
+                val diagnostics = controller.diagnostics.value
+                // TTS completion is not an acknowledgement that the framework
+                // has published the state set by the asynchronous onPlay callback.
+                diagnostics.lastAnnouncementAt?.let { it > previousAnnouncementAt } == true &&
+                    diagnostics.lastAnnouncementSucceeded == true &&
+                    playCount.get() == expectedPlayPerTransition * (completedAnnouncements + 1) &&
+                    playerController.playbackState?.state == PlaybackState.STATE_PLAYING
+            }
+            previousAnnouncementAt = requireNotNull(controller.diagnostics.value.lastAnnouncementAt)
+            completedAnnouncements += 1
+
+            assertEquals(
+                "pause mode should pause once per announcement",
+                expectedPausePerTransition * completedAnnouncements,
+                pauseCount.get(),
+            )
+            assertEquals(
+                "pause mode should play once per announcement",
+                expectedPlayPerTransition * completedAnnouncements,
+                playCount.get(),
+            )
+            assertEquals(PlaybackState.STATE_PLAYING, playerController.playbackState?.state)
+        }
+
+        assertEquals(TRANSITION_COUNT, completedAnnouncements)
+        assertEquals(
+            "pause mode should issue one pause per transition",
+            TRANSITION_COUNT * expectedPausePerTransition,
+            pauseCount.get(),
+        )
+        assertEquals(
+            "pause mode should issue one play per transition",
+            TRANSITION_COUNT * expectedPlayPerTransition,
+            playCount.get(),
+        )
+        Log.i(
+            LATENCY_TAG,
+            "PAUSE_AND_RESTORE transitions=$TRANSITION_COUNT " +
+                "ttsCompleted=$completedAnnouncements pause=${pauseCount.get()} play=${playCount.get()} " +
+                "finalState=${playerController.playbackState?.state}",
+        )
+    }
+
+    private fun configureAndEnableAnnouncementMode(musicTreatment: MusicTreatment) {
+        runBlocking {
+            app.repository.updateUserSettings { current ->
+                current.copy(
+                    enabled = false,
+                    musicTreatment = musicTreatment,
+                    trackStartBehavior = TrackStartBehavior.ANNOUNCE_THEN_PLAY,
+                    outputPolicy = AnnouncementOutputPolicy.ALL_OUTPUTS,
+                    timing = AnnouncementTiming.IMMEDIATE,
+                    delaySeconds = 0,
+                    minimumPlaybackSeconds = 0,
+                    defaultReadFields = listOf(AnnouncementReadField.TITLE),
+                    allowRepeatAnnouncements = false,
+                )
+            }
+        }
+        waitUntil {
+            !controller.userSettings.value.enabled &&
+                controller.userSettings.value.trackStartBehavior == TrackStartBehavior.ANNOUNCE_THEN_PLAY &&
+                controller.userSettings.value.musicTreatment == musicTreatment
+        }
+        pauseCount.set(0)
+        playCount.set(0)
+
+        runBlocking {
+            app.repository.updateUserSettings { it.copy(enabled = true) }
+        }
+        waitUntil {
+            controller.userSettings.value.enabled &&
+                controller.userSettings.value.trackStartBehavior == TrackStartBehavior.ANNOUNCE_THEN_PLAY &&
+                controller.userSettings.value.musicTreatment == musicTreatment
+        }
     }
 
     private fun publishTrack(index: Int) {
@@ -249,11 +403,6 @@ class AnnounceThenPlayLatencyInstrumentedTest {
             .build(),
         queueId,
     )
-
-    private fun percentile(sorted: List<Double>, percentile: Double): Double {
-        val index = ((sorted.size - 1) * percentile).toInt().coerceIn(sorted.indices)
-        return sorted[index]
-    }
 
     private fun waitUntil(timeoutMs: Long = 3_000L, condition: () -> Boolean) {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
