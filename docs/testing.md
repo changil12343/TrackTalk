@@ -42,6 +42,10 @@ When changing playback behavior, retain or add coverage for:
 - unrelated notification posted/removed followed by active-session refresh,
   listener reconnect, or controller replacement while the same core track is
   playing, all with zero new TTS and zero transport commands;
+- a supported media-notification hint whose fresh MediaSession snapshot finds
+  a callback-missed replacement track, same-track hint snapshots, unrelated
+  notifications, burst coalescing, and a normal metadata-callback/hint race;
+  only the authoritative changed snapshot may produce one announcement;
 - process/session recreation with the same currently playing track;
 - controller replacement with a late stale callback, session destruction or
   removal, listener reconnect, and monitor restart without any inherited

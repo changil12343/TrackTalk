@@ -330,6 +330,75 @@ class AnnounceThenPlayLatencyInstrumentedTest {
         )
     }
 
+    @Test
+    fun notificationReconciliationRaceAnnouncesOneNewTrackWithoutExtraTransport() {
+        configureAndEnableAnnouncementMode(MusicTreatment.KEEP)
+        val playerController = MediaController(context, session.sessionToken)
+        val previousAnnouncementAt = controller.diagnostics.value.lastAnnouncementAt ?: 0L
+
+        // The metadata callback and the notification hint deliberately race. All hints must use
+        // the normal MediaSession pipeline, which admits the new track exactly once.
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            publishTrack(1)
+            repeat(10) {
+                controller.onMediaNotificationReconcileHint(context.packageName)
+            }
+        }
+
+        waitUntil(timeoutMs = 3_000L) {
+            controller.mediaState.value.currentEvent?.mediaId == TRACKS[1].mediaId
+        }
+        waitUntil(timeoutMs = 8_000L) {
+            val diagnostics = controller.diagnostics.value
+            diagnostics.lastAnnouncementAt?.let { it > previousAnnouncementAt } == true &&
+                diagnostics.lastAnnouncementSucceeded == true
+        }
+        val acceptedAnnouncementAt = requireNotNull(controller.diagnostics.value.lastAnnouncementAt)
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+        assertEquals(
+            "notification reconciliation plus a normal callback must not announce twice",
+            acceptedAnnouncementAt,
+            controller.diagnostics.value.lastAnnouncementAt,
+        )
+        assertEquals(0, pauseCount.get())
+        assertEquals(0, playCount.get())
+        assertEquals(PlaybackState.STATE_PLAYING, playerController.playbackState?.state)
+    }
+
+    @Test
+    fun sameTrackOrUnrelatedNotificationHintDoesNotReannounceOrRestore() {
+        configureAndEnableAnnouncementMode(MusicTreatment.PAUSE)
+        val playerController = MediaController(context, session.sessionToken)
+        val previousAnnouncementAt = controller.diagnostics.value.lastAnnouncementAt ?: 0L
+        publishTrack(1)
+        waitUntil(timeoutMs = 3_000L) {
+            controller.mediaState.value.currentEvent?.mediaId == TRACKS[1].mediaId
+        }
+        waitUntil(timeoutMs = 8_000L) {
+            val diagnostics = controller.diagnostics.value
+            diagnostics.lastAnnouncementAt?.let { it > previousAnnouncementAt } == true &&
+                diagnostics.lastAnnouncementSucceeded == true &&
+                pauseCount.get() == 1 &&
+                playCount.get() == 1 &&
+                playerController.playbackState?.state == PlaybackState.STATE_PLAYING
+        }
+        val acceptedAnnouncementAt = requireNotNull(controller.diagnostics.value.lastAnnouncementAt)
+
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            repeat(10) {
+                controller.onMediaNotificationReconcileHint(context.packageName)
+            }
+            controller.onMediaNotificationReconcileHint("com.android.settings")
+        }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+        assertEquals(acceptedAnnouncementAt, controller.diagnostics.value.lastAnnouncementAt)
+        assertEquals("same-track hint must not issue a second PAUSE", 1, pauseCount.get())
+        assertEquals("same-track hint must not issue a second PLAY", 1, playCount.get())
+        assertEquals(PlaybackState.STATE_PLAYING, playerController.playbackState?.state)
+    }
+
     private fun configureAndEnableAnnouncementMode(musicTreatment: MusicTreatment) {
         runBlocking {
             app.repository.updateUserSettings { current ->

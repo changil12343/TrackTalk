@@ -32,6 +32,15 @@ late callback from a detached controller can share that key with its
 replacement. Metadata, playback, queue, and destruction callbacks must match
 the current generation before they can affect session state, TTS, or restore.
 
+For a supported player, an eligible media transport notification with
+MediaSession evidence may queue one coalesced **MediaSession reconciliation
+hint** for the currently selected package. The notification is never track
+metadata, identity, a playback occurrence, or speech authority: the monitor
+reads a fresh controller snapshot and feeds the ordinary normalized update
+path. A same-track snapshot is side-effect free; it creates no candidate,
+focus cycle, transport command, or announcement. Unrelated/system
+notifications and package-mismatched notifications do not reconcile.
+
 `onSessionDestroyed` invalidates only the matching controller generation and
 then performs one active-session reconciliation to select and synchronize a
 replacement. A disappearing provider session is infrastructure churn, not a
@@ -75,6 +84,11 @@ the current logical-track baseline. Re-observing the same core track through
 any of those infrastructure paths creates no announcement candidate, pause,
 or TTS request. Controller generations remain callback-validity evidence only;
 they are never track identity.
+
+The optional media-notification reconciliation hint follows the same rule. A
+normal metadata callback and a hint snapshot may race for the same new track;
+the existing occurrence and duplicate gates remain the sole exactly-once
+authority.
 
 The suppression history is not a historical blacklist. A real sequence
 `A → B → A` is a new occurrence and can announce A again. A repeat-one cycle

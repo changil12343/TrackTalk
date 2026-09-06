@@ -48,6 +48,7 @@ class MediaSessionMonitor(
     private val controllerGenerations = ControllerGenerationRegistry()
     private var started = false
     private var sessionRecoveryScheduled = false
+    private var pendingMediaNotificationReconcile: PendingMediaNotificationReconcile? = null
     private var monitorLifecycleGeneration = 0L
     private var selectedSessionKey: String? = null
     private var resumeRequestId = 0L
@@ -98,6 +99,7 @@ class MediaSessionMonitor(
 
     fun stop() {
         runOnMonitorThread {
+            cancelPendingMediaNotificationReconcile("MONITOR_STOPPED")
             cancelActiveResume("MONITOR_STOPPED")
             resumeRequestId += 1
             if (!started) {
@@ -127,6 +129,58 @@ class MediaSessionMonitor(
         runOnMonitorThread {
             if (!started) return@runOnMonitorThread
             refreshControllersFromSystem(reason = "MANUAL_REFRESH")
+        }
+    }
+
+    /**
+     * Reconcile one eligible media-notification hint through the monitor's existing serialized
+     * session snapshot path. The hint has no metadata, occurrence, or transport authority.
+     */
+    fun reconcileFromMediaNotificationHint(sourcePackageName: String) {
+        runOnMonitorThread {
+            if (!started) {
+                logMediaNotificationReconcileCancelled(sourcePackageName, "MONITOR_NOT_STARTED")
+                return@runOnMonitorThread
+            }
+            val selected = selectedTrackedSession()
+            if (selected == null) {
+                logMediaNotificationReconcileCancelled(sourcePackageName, "NO_SELECTED_SESSION")
+                return@runOnMonitorThread
+            }
+            if (selected.controller.packageName != sourcePackageName) {
+                logMediaNotificationReconcileCancelled(sourcePackageName, "SOURCE_PACKAGE_MISMATCH")
+                return@runOnMonitorThread
+            }
+
+            val existing = pendingMediaNotificationReconcile
+            if (existing != null) {
+                TrackTalkDebugLog.event(
+                    "MEDIA_RECONCILE_COALESCED",
+                    "package" to sourcePackageName,
+                    "sessionKey" to selected.sessionKey,
+                    "controllerGeneration" to selected.generation,
+                    "pendingSessionKey" to existing.sessionKey,
+                )
+                return@runOnMonitorThread
+            }
+
+            val pending = PendingMediaNotificationReconcile(
+                sourcePackageName = sourcePackageName,
+                sessionKey = selected.sessionKey,
+                controllerGeneration = selected.generation,
+                monitorLifecycleGeneration = monitorLifecycleGeneration,
+            )
+            pendingMediaNotificationReconcile = pending
+            TrackTalkDebugLog.event(
+                "MEDIA_RECONCILE_HINT",
+                "package" to sourcePackageName,
+                "sessionKey" to selected.sessionKey,
+                "controllerGeneration" to selected.generation,
+                "monitorLifecycleGeneration" to monitorLifecycleGeneration,
+            )
+            handler.post {
+                runPendingMediaNotificationReconcile(pending)
+            }
         }
     }
 
@@ -308,6 +362,67 @@ class MediaSessionMonitor(
         }
     }
 
+    private fun runPendingMediaNotificationReconcile(
+        pending: PendingMediaNotificationReconcile,
+    ) {
+        if (pendingMediaNotificationReconcile != pending) {
+            logMediaNotificationReconcileCancelled(
+                sourcePackageName = pending.sourcePackageName,
+                reason = "SUPERSEDED",
+            )
+            return
+        }
+        pendingMediaNotificationReconcile = null
+        if (!started || pending.monitorLifecycleGeneration != monitorLifecycleGeneration) {
+            logMediaNotificationReconcileCancelled(
+                sourcePackageName = pending.sourcePackageName,
+                reason = "MONITOR_GENERATION_CHANGED",
+            )
+            return
+        }
+        val selected = selectedTrackedSession()
+        if (
+            selected == null ||
+                selected.sessionKey != pending.sessionKey ||
+                selected.generation != pending.controllerGeneration ||
+                selected.controller.packageName != pending.sourcePackageName
+        ) {
+            logMediaNotificationReconcileCancelled(
+                sourcePackageName = pending.sourcePackageName,
+                reason = "SESSION_OR_CONTROLLER_CHANGED",
+            )
+            return
+        }
+        TrackTalkDebugLog.event(
+            "MEDIA_RECONCILE_START",
+            "package" to pending.sourcePackageName,
+            "sessionKey" to pending.sessionKey,
+            "controllerGeneration" to pending.controllerGeneration,
+            "monitorLifecycleGeneration" to pending.monitorLifecycleGeneration,
+        )
+        refreshControllersFromSystem(
+            reason = "MEDIA_NOTIFICATION_RECONCILE",
+            eventType = MediaEventType.MEDIA_NOTIFICATION_RECONCILE,
+        )
+    }
+
+    private fun cancelPendingMediaNotificationReconcile(reason: String) {
+        val pending = pendingMediaNotificationReconcile ?: return
+        pendingMediaNotificationReconcile = null
+        logMediaNotificationReconcileCancelled(pending.sourcePackageName, reason)
+    }
+
+    private fun logMediaNotificationReconcileCancelled(
+        sourcePackageName: String,
+        reason: String,
+    ) {
+        TrackTalkDebugLog.event(
+            "MEDIA_RECONCILE_CANCELLED",
+            "package" to sourcePackageName,
+            "reason" to reason,
+        )
+    }
+
     private fun refreshControllersFromSystem(
         reason: String,
         recovery: Boolean = false,
@@ -325,6 +440,12 @@ class MediaSessionMonitor(
             manager.getActiveSessions(listenerComponent).orEmpty()
         }
         if (controllers == null) {
+            if (eventType == MediaEventType.MEDIA_NOTIFICATION_RECONCILE) {
+                TrackTalkDebugLog.event(
+                    "MEDIA_RECONCILE_FAILED",
+                    "reason" to "ACTIVE_SESSION_READ_FAILED",
+                )
+            }
             if (recovery) {
                 TrackTalkDebugLog.event(
                     "SESSION_RECOVERY_DONE",
@@ -632,6 +753,7 @@ class MediaSessionMonitor(
                 MediaEventType.METADATA -> "METADATA_CALLBACK"
                 MediaEventType.PLAYBACK_STATE -> "PLAYBACK_STATE_CALLBACK"
                 MediaEventType.QUEUE -> "QUEUE_CALLBACK"
+                MediaEventType.MEDIA_NOTIFICATION_RECONCILE -> "MEDIA_RECONCILE_SNAPSHOT"
                 else -> "MEDIA_CALLBACK"
             },
             "timestamp" to now,
@@ -1444,6 +1566,13 @@ class MediaSessionMonitor(
         val controller: MediaController,
         val event: PlaybackEvent,
         val match: PlaybackRestoreTrackMatch,
+    )
+
+    private data class PendingMediaNotificationReconcile(
+        val sourcePackageName: String,
+        val sessionKey: String,
+        val controllerGeneration: Long,
+        val monitorLifecycleGeneration: Long,
     )
 
     private data class PublishedSelection(

@@ -407,6 +407,85 @@ class MediaSessionMonitorInstrumentedTest {
     }
 
     @Test
+    fun mediaNotificationHintReconcilesFreshTrackSnapshot() {
+        val updates = CopyOnWriteArrayList<MediaMonitorUpdate>()
+        val monitor = MediaSessionMonitor(context, updates::add)
+        monitor.start()
+        try {
+            waitUntil { updates.any { it.selected?.event?.mediaId == "delayed-resume-test" } }
+
+            // The normal callback may arrive too, but this assertion is specifically about the
+            // hint-triggered snapshot: it must read the authoritative controller state rather
+            // than use notification content as track metadata.
+            session.setMetadata(
+                MediaMetadata.Builder()
+                    .putString(MediaMetadata.METADATA_KEY_TITLE, "Reconciled Track")
+                    .putString(MediaMetadata.METADATA_KEY_ARTIST, "TrackTalk")
+                    .putString(MediaMetadata.METADATA_KEY_MEDIA_ID, "reconciled-track")
+                    .build(),
+            )
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                monitor.reconcileFromMediaNotificationHint(context.packageName)
+            }
+
+            waitUntil {
+                updates.any { update ->
+                    update.eventType == MediaEventType.MEDIA_NOTIFICATION_RECONCILE &&
+                        update.selected?.event?.mediaId == "reconciled-track"
+                }
+            }
+            assertEquals(0, pauseCommandCount.get())
+            assertEquals(0, playCommandCount.get())
+        } finally {
+            monitor.stop()
+        }
+    }
+
+    @Test
+    fun sameTrackMediaNotificationBurstCoalescesAndUnrelatedPackageIsIgnored() {
+        val updates = CopyOnWriteArrayList<MediaMonitorUpdate>()
+        val monitor = MediaSessionMonitor(context, updates::add)
+        monitor.start()
+        try {
+            waitUntil { updates.any { it.selected?.event?.mediaId == "delayed-resume-test" } }
+            val generationBeforeHint = requireNotNull(
+                updates.last { it.selected?.event?.mediaId == "delayed-resume-test" }
+                    .selectedControllerGeneration,
+            )
+
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                repeat(10) {
+                    monitor.reconcileFromMediaNotificationHint(context.packageName)
+                }
+            }
+            waitUntil {
+                updates.count { it.eventType == MediaEventType.MEDIA_NOTIFICATION_RECONCILE } == 1
+            }
+            val reconciliations = updates.filter {
+                it.eventType == MediaEventType.MEDIA_NOTIFICATION_RECONCILE
+            }
+            assertEquals(1, reconciliations.size)
+            assertEquals("delayed-resume-test", reconciliations.single().selected?.event?.mediaId)
+            assertEquals(
+                "A same-token reconciliation is not a controller-generation boundary",
+                generationBeforeHint,
+                reconciliations.single().selectedControllerGeneration,
+            )
+            assertEquals(0, pauseCommandCount.get())
+            assertEquals(0, playCommandCount.get())
+
+            monitor.reconcileFromMediaNotificationHint("com.android.settings")
+            assertEquals(
+                "A non-selected package must not produce a reconciliation update",
+                1,
+                updates.count { it.eventType == MediaEventType.MEDIA_NOTIFICATION_RECONCILE },
+            )
+        } finally {
+            monitor.stop()
+        }
+    }
+
+    @Test
     fun resumeCommandIsIssuedBeforeImmediateMonitorStop() {
         val monitor = MediaSessionMonitor(context) {}
         monitor.start()

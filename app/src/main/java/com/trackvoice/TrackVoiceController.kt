@@ -455,6 +455,24 @@ class TrackVoiceController(
 
     fun refreshMediaSessions() = monitor?.refresh()
 
+    /**
+     * A supported media notification is only a reconciliation hint. The monitor re-reads the
+     * selected MediaSession and feeds its normal update pipeline; notification content never
+     * reaches identity, occurrence, or speech policy.
+     */
+    fun onMediaNotificationReconcileHint(sourcePackageName: String) {
+        val activeMonitor = monitor
+        if (activeMonitor == null) {
+            TrackTalkDebugLog.event(
+                "MEDIA_RECONCILE_CANCELLED",
+                "package" to sourcePackageName,
+                "reason" to "NO_MONITOR",
+            )
+            return
+        }
+        activeMonitor.reconcileFromMediaNotificationHint(sourcePackageName)
+    }
+
     fun refreshSupportedMediaApps() = discoverSupportedMediaApps()
 
     fun togglePlayback(): Boolean? {
@@ -1424,6 +1442,32 @@ class TrackVoiceController(
                 current = event,
                 requireSameSource = true,
             )
+        if (update.eventType == MediaEventType.MEDIA_NOTIFICATION_RECONCILE) {
+            when {
+                previousEvent == null || event == null -> TrackTalkDebugLog.event(
+                    "MEDIA_RECONCILE_CANCELLED",
+                    "eventSequenceNumber" to update.eventSequenceNumber,
+                    "sessionKey" to incomingSessionKey,
+                    "reason" to "NO_COMPARABLE_SNAPSHOT",
+                )
+
+                actualTrackChange -> TrackTalkDebugLog.event(
+                    "MEDIA_RECONCILE_TRACK_CHANGED",
+                    "eventSequenceNumber" to update.eventSequenceNumber,
+                    "sessionKey" to incomingSessionKey,
+                    "controllerGeneration" to incomingControllerGeneration,
+                    "playing" to event.isPlaying,
+                )
+
+                else -> TrackTalkDebugLog.event(
+                    "MEDIA_RECONCILE_SAME_TRACK",
+                    "eventSequenceNumber" to update.eventSequenceNumber,
+                    "sessionKey" to incomingSessionKey,
+                    "controllerGeneration" to incomingControllerGeneration,
+                    "playing" to event.isPlaying,
+                )
+            }
+        }
         if (actualTrackChange) {
             boundaryIdentityCoherenceGuard.reset()
             cancelBoundaryIdentityConfirmation()

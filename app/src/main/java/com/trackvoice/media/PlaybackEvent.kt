@@ -436,6 +436,8 @@ enum class MediaEventType {
     PLAYBACK_STATE,
     QUEUE,
     ACTIVE_SESSIONS,
+    /** A coalesced media-notification hint caused one authoritative snapshot refresh. */
+    MEDIA_NOTIFICATION_RECONCILE,
 }
 
 data class MediaMonitorUpdate(

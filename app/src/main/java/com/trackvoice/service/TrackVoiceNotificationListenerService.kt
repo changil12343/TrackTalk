@@ -1,5 +1,6 @@
 package com.trackvoice.service
 
+import android.app.Notification
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -30,6 +31,11 @@ class TrackVoiceNotificationListenerService : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         if (sbn.packageName != "com.google.android.apps.youtube.music") return
         val extras = sbn.notification.extras
+        val eligibleMediaHint = MediaNotificationReconciliationEligibility.isEligible(
+            packageName = sbn.packageName,
+            category = sbn.notification.category,
+            hasMediaSessionToken = extras?.containsKey(Notification.EXTRA_MEDIA_SESSION) == true,
+        )
         TrackTalkDebugLog.event(
             "NOTIFICATION_MEDIA_EVIDENCE",
             "package" to sbn.packageName,
@@ -37,7 +43,13 @@ class TrackVoiceNotificationListenerService : NotificationListenerService() {
             "ongoing" to sbn.isOngoing,
             "extras" to extras?.keySet()?.sorted()?.joinToString(",", prefix = "[", postfix = "]"),
             "trackLikeCandidates" to extras.trackLikeNumericCandidates(),
+            "eligibleMediaHint" to eligibleMediaHint,
         )
+        if (eligibleMediaHint) {
+            // Notification data is never metadata or a transition proof. It only asks the
+            // existing serialized MediaSession path to take one fresh authoritative snapshot.
+            application.controller.onMediaNotificationReconcileHint(sbn.packageName)
+        }
     }
 
     override fun onListenerConnected() {
@@ -127,4 +139,16 @@ class TrackVoiceNotificationListenerService : NotificationListenerService() {
         }
         ?.joinToString(",")
         .orEmpty()
+}
+
+/** Narrows notification-triggered reconciliation to supported media evidence only. */
+internal object MediaNotificationReconciliationEligibility {
+    fun isEligible(
+        packageName: String,
+        category: String?,
+        hasMediaSessionToken: Boolean,
+    ): Boolean =
+        packageName == "com.google.android.apps.youtube.music" &&
+            category == Notification.CATEGORY_TRANSPORT &&
+            hasMediaSessionToken
 }
