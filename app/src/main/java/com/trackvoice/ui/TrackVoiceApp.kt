@@ -168,8 +168,26 @@ internal enum class GuideSettingsPane {
 }
 
 private const val LEGACY_VOICE_SECTION_NAME = "VOICE"
+private const val CURRENT_PLAYBACK_ANNOUNCEMENT_ROW_TEST_TAG = "currentPlaybackAnnouncementRow"
+private const val CURRENT_PLAYBACK_READING_ROW_TEST_TAG = "currentPlaybackReadingRow"
 
 private val TrackVoiceCardShape = RoundedCornerShape(14.dp)
+
+private object CurrentPlaybackCardSpacing {
+    val cardHorizontal = 24.dp
+    // IconButton keeps a 48dp touch target; 4dp here yields a visual title offset near 20dp.
+    val cardTop = 4.dp
+    val cardBottom = 16.dp
+    val headingToFirstRow = 20.dp
+    val metadataRowGap = 12.dp
+    val metadataToDivider = 20.dp
+    // Settings rows keep a 48dp target; 8dp here plus their internal centering reads as 20dp.
+    val dividerToSettings = 8.dp
+    val settingsRowGap = 4.dp
+    val labelWidth = 96.dp
+    val labelToValue = 12.dp
+    val settingsChevronSize = 18.dp
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -809,7 +827,7 @@ internal fun RequiredPermissionBanner(onOpenPermission: () -> Unit) {
 }
 
 @Composable
-private fun CurrentTrackCard(
+internal fun CurrentTrackCard(
     event: PlaybackEvent?,
     corePermissionGranted: Boolean,
     settings: UserSettings,
@@ -826,8 +844,12 @@ private fun CurrentTrackCard(
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .padding(horizontal = CurrentPlaybackCardSpacing.cardHorizontal)
+                .padding(
+                    top = CurrentPlaybackCardSpacing.cardTop,
+                    bottom = CurrentPlaybackCardSpacing.cardBottom,
+                ),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -848,24 +870,31 @@ private fun CurrentTrackCard(
                     }
                 }
             }
+            Spacer(Modifier.height(CurrentPlaybackCardSpacing.headingToFirstRow))
             if (event == null) {
                 if (corePermissionGranted) {
-                    Text(strings.noMusicPlaying)
-                    Text(strings.playMusicHint, style = MaterialTheme.typography.bodySmall)
+                    Column(verticalArrangement = Arrangement.spacedBy(CurrentPlaybackCardSpacing.metadataRowGap)) {
+                        Text(strings.noMusicPlaying)
+                        Text(strings.playMusicHint, style = MaterialTheme.typography.bodySmall)
+                    }
                 } else {
                     Text(strings.permissionPlaybackSummary)
                 }
             } else {
-                TrackField(strings.appField, event.sourceAppName)
-                TrackField(strings.trackField, event.title ?: strings.unknownTitle)
-                TrackField(strings.artistField, event.artist ?: strings.unknownArtist)
-                TrackField(strings.albumField, event.album ?: strings.unknownAlbum)
+                Column(verticalArrangement = Arrangement.spacedBy(CurrentPlaybackCardSpacing.metadataRowGap)) {
+                    TrackField(strings.appField, event.sourceAppName)
+                    TrackField(strings.trackField, event.title ?: strings.unknownTitle)
+                    TrackField(strings.artistField, event.artist ?: strings.unknownArtist)
+                    TrackField(strings.albumField, event.album ?: strings.unknownAlbum)
+                }
+                Spacer(Modifier.height(CurrentPlaybackCardSpacing.metadataToDivider))
                 CurrentAnnouncementSummaryRows(
                     configuration = announcementConfiguration,
                     timing = settings.timing,
                     delaySeconds = settings.delaySeconds,
                     trackStartBehavior = settings.trackStartBehavior,
-                    onClick = onOpenAnnouncementSettings,
+                    onAnnouncementClick = onOpenAnnouncementSettings,
+                    onReadingClick = onOpenAnnouncementSettings,
                 )
             }
         }
@@ -878,77 +907,104 @@ private fun CurrentAnnouncementSummaryRows(
     timing: AnnouncementTiming,
     delaySeconds: Int,
     trackStartBehavior: TrackStartBehavior,
-    onClick: () -> Unit,
+    onAnnouncementClick: () -> Unit,
+    onReadingClick: () -> Unit,
 ) {
     val strings = LocalTrackTalkStrings.current
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(top = 12.dp, bottom = 12.dp),
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Spacer(Modifier.height(12.dp))
-            Box(Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(end = 28.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    AnnouncementSummaryRow(
-                        label = strings.announcementLabel,
-                        value = strings.homeAnnouncementBehavior(trackStartBehavior, timing, delaySeconds),
-                    )
-                    AnnouncementSummaryRow(
-                        label = strings.readingOrderLabel,
-                        value = strings.announcementFieldsSummary(configuration.fields),
-                    )
-                }
-                Icon(
-                    Icons.Default.ChevronRight,
-                    contentDescription = strings.openGuideSettings,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .size(18.dp),
-                )
-            }
-        }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        Spacer(Modifier.height(CurrentPlaybackCardSpacing.dividerToSettings))
+        AnnouncementSummaryNavigationRow(
+            label = strings.announcementLabel,
+            value = strings.homeAnnouncementBehavior(trackStartBehavior, timing, delaySeconds),
+            testTag = CURRENT_PLAYBACK_ANNOUNCEMENT_ROW_TEST_TAG,
+            onClick = onAnnouncementClick,
+        )
+        Spacer(Modifier.height(CurrentPlaybackCardSpacing.settingsRowGap))
+        AnnouncementSummaryNavigationRow(
+            label = strings.readingOrderLabel,
+            value = strings.announcementFieldsSummary(configuration.fields),
+            testTag = CURRENT_PLAYBACK_READING_ROW_TEST_TAG,
+            onClick = onReadingClick,
+        )
     }
 }
 
 @Composable
-private fun AnnouncementSummaryRow(label: String, value: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
+private fun AnnouncementSummaryNavigationRow(
+    label: String,
+    value: String,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    val strings = LocalTrackTalkStrings.current
+    CurrentPlaybackKeyValueRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .testTag(testTag)
+            .clickable(role = Role.Button, onClick = onClick),
+        label = {
+            Text(
+                label,
+                modifier = it,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        },
+        value = {
+            Text(
+                value,
+                modifier = it,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        trailing = {
+            Icon(
+                Icons.Default.ChevronRight,
+                contentDescription = strings.openGuideSettings,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(CurrentPlaybackCardSpacing.settingsChevronSize),
+            )
+        },
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(
-            label,
-            modifier = Modifier.width(64.dp),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            style = MaterialTheme.typography.bodySmall,
-        )
-        Text(
-            value,
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
+    )
 }
 
 @Composable
 private fun TrackField(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(label, modifier = Modifier.width(64.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    CurrentPlaybackKeyValueRow(
+        label = {
+            Text(
+                label,
+                modifier = it,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        value = {
+            Text(value, modifier = it, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        },
+    )
+}
+
+@Composable
+private fun CurrentPlaybackKeyValueRow(
+    modifier: Modifier = Modifier.fillMaxWidth(),
+    label: @Composable (Modifier) -> Unit,
+    value: @Composable RowScope.(Modifier) -> Unit,
+    trailing: @Composable RowScope.() -> Unit = {},
+    verticalAlignment: Alignment.Vertical = Alignment.Top,
+) {
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(CurrentPlaybackCardSpacing.labelToValue),
+        verticalAlignment = verticalAlignment,
+    ) {
+        label(Modifier.width(CurrentPlaybackCardSpacing.labelWidth))
+        value(Modifier.weight(1f))
+        trailing()
     }
 }
 
