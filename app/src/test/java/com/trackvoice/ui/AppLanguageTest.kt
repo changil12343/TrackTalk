@@ -41,6 +41,7 @@ class AppLanguageTest {
     fun stringsFollowSelectedLanguage() {
         assertEquals("홈", TrackTalkStrings.forLanguage(AppLanguage.KOREAN, "en").navLabel(AppSection.HOME))
         assertEquals("Home", TrackTalkStrings.forLanguage(AppLanguage.ENGLISH, "ko").navLabel(AppSection.HOME))
+        assertEquals("안내·음성", TrackTalkStrings.forLanguage(AppLanguage.KOREAN, "en").sectionTitle(AppSection.GENERAL))
         assertEquals("안내·음성", TrackTalkStrings.forLanguage(AppLanguage.KOREAN, "en").navLabel(AppSection.GENERAL))
         assertEquals("기기", TrackTalkStrings.forLanguage(AppLanguage.KOREAN, "en").navLabel(AppSection.DEVICES))
         assertEquals("Speech", TrackTalkStrings.forLanguage(AppLanguage.ENGLISH, "ko").navLabel(AppSection.GENERAL))
@@ -173,6 +174,8 @@ class AppLanguageTest {
         assertEquals("Speech language", english.defaultVoiceLanguage)
         assertEquals("Auto-detect from title", english.voiceLanguage(VoiceLanguage.AUTO))
         assertEquals("Choose which apps TrackTalk monitors.", english.appsIntro)
+        assertEquals("Announcements & voice", english.sectionTitle(AppSection.GENERAL))
+        assertEquals("Screen automation", english.screenAutomation)
         assertEquals("Device & diagnostics", english.sectionTitle(AppSection.DEVICES))
         assertEquals("Send feedback", english.feedbackDeveloper)
         assertEquals("Wired headphones", english.audioDeviceType(AudioDeviceKind.WIRED_HEADPHONES))

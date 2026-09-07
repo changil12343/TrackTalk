@@ -8,145 +8,81 @@ import org.junit.Test
 
 class NotificationPermissionBannerTest {
     @Test
-    fun bannerIsShownOnlyWhenRuntimePermissionIsNeededAndMissing() {
+    fun statusNotificationNeedsPermissionOnlyWhenRuntimePermissionIsMissing() {
         assertTrue(
-            shouldShowNotificationPermissionBanner(
+            statusNotificationNeedsPermission(
                 requiresRuntimePermission = true,
                 permissionGranted = false,
-                statusNotificationEnabled = true,
             ),
         )
         assertFalse(
-            shouldShowNotificationPermissionBanner(
+            statusNotificationNeedsPermission(
                 requiresRuntimePermission = true,
                 permissionGranted = true,
-                statusNotificationEnabled = true,
             ),
         )
         assertFalse(
-            shouldShowNotificationPermissionBanner(
+            statusNotificationNeedsPermission(
                 requiresRuntimePermission = false,
                 permissionGranted = false,
-                statusNotificationEnabled = true,
-            ),
-        )
-        assertFalse(
-            shouldShowNotificationPermissionBanner(
-                requiresRuntimePermission = true,
-                permissionGranted = false,
-                statusNotificationEnabled = false,
-            ),
-        )
-        assertFalse(
-            shouldShowNotificationPermissionBanner(
-                requiresRuntimePermission = true,
-                permissionGranted = false,
-                statusNotificationEnabled = true,
-                requiredPermissionGranted = false,
             ),
         )
     }
 
     @Test
-    fun bannerCopyIsConciseAndLocalized() {
+    fun statusNotificationCardCopyIsConciseAndLocalized() {
         val korean = TrackTalkStrings.forLanguage(AppLanguage.KOREAN, "en")
-        assertEquals("상단바 상태 알림", korean.notificationPermissionTitle)
-        assertEquals("현재 안내 상태를 확인하고 빠르게 켜거나 끕니다.", korean.notificationPermissionSummary)
+        assertEquals("상단바 상태 알림", korean.statusShortcut)
+        assertEquals("현재 안내 상태를 상단바에서 확인합니다.", korean.statusShortcutSummary)
+        assertEquals("알림을 표시하려면 권한이 필요합니다.", korean.statusShortcutPermissionSummary)
         assertEquals("음악 감지 권한 필요", korean.musicDetectionPermissionTitle)
         assertEquals("필수", korean.requiredPermissionBadge)
-        assertEquals("선택", korean.optionalPermissionBadge)
-        assertEquals("허용", korean.allowNotifications)
+        assertEquals("권한 설정", korean.permissionSettings)
 
         val english = TrackTalkStrings.forLanguage(AppLanguage.ENGLISH, "ko")
-        assertEquals("Status notification", english.notificationPermissionTitle)
-        assertEquals(
-            "See TrackTalk's current status and quickly turn announcements on or off.",
-            english.notificationPermissionSummary,
-        )
+        assertEquals("Status notification", english.statusShortcut)
+        assertEquals("See TrackTalk's current status in the status bar.", english.statusShortcutSummary)
+        assertEquals("Notification permission is required to show it.", english.statusShortcutPermissionSummary)
         assertEquals("Music detection", english.musicDetectionPermissionTitle)
         assertEquals("Required", english.requiredPermissionBadge)
-        assertEquals("Optional", english.optionalPermissionBadge)
-        assertEquals("Allow", english.allowNotifications)
+        assertEquals("Open settings", english.permissionSettings)
     }
 
     @Test
-    fun homePermissionPresentationProgressivelyRevealsOptionalPermission() {
+    fun homePermissionPresentationKeepsCorePermissionAndPlaybackSemantics() {
         val requiredMissing = resolveHomePermissionPresentation(
             requiredPermissionGranted = false,
-            optionalPermissionGranted = false,
-            requiresOptionalRuntimePermission = true,
-            statusNotificationEnabled = true,
             isPremium = false,
         )
         assertTrue(requiredMissing.showRequiredPermission)
-        assertFalse(requiredMissing.showOptionalPermission)
         assertFalse(requiredMissing.showPremiumPromotion)
         assertFalse(requiredMissing.showCurrentPlayback)
 
-        val optionalMissing = resolveHomePermissionPresentation(
+        val requiredGranted = resolveHomePermissionPresentation(
             requiredPermissionGranted = true,
-            optionalPermissionGranted = false,
-            requiresOptionalRuntimePermission = true,
-            statusNotificationEnabled = true,
             isPremium = false,
         )
-        assertFalse(optionalMissing.showRequiredPermission)
-        assertTrue(optionalMissing.showOptionalPermission)
-        assertTrue(optionalMissing.showPremiumPromotion)
-        assertTrue(optionalMissing.showCurrentPlayback)
+        assertFalse(requiredGranted.showRequiredPermission)
+        assertTrue(requiredGranted.showPremiumPromotion)
+        assertTrue(requiredGranted.showCurrentPlayback)
 
-        val allGranted = resolveHomePermissionPresentation(
+        val premium = resolveHomePermissionPresentation(
             requiredPermissionGranted = true,
-            optionalPermissionGranted = true,
-            requiresOptionalRuntimePermission = true,
-            statusNotificationEnabled = true,
             isPremium = true,
         )
-        assertFalse(allGranted.showRequiredPermission)
-        assertFalse(allGranted.showOptionalPermission)
-        assertFalse(allGranted.showPremiumPromotion)
-        assertTrue(allGranted.showCurrentPlayback)
+        assertFalse(premium.showRequiredPermission)
+        assertFalse(premium.showPremiumPromotion)
+        assertTrue(premium.showCurrentPlayback)
     }
 
     @Test
-    fun revokingRequiredPermissionHidesStalePlaybackAndOptionalPrompt() {
+    fun revokingRequiredPermissionHidesStalePlayback() {
         val state = resolveHomePermissionPresentation(
             requiredPermissionGranted = false,
-            optionalPermissionGranted = true,
-            requiresOptionalRuntimePermission = true,
-            statusNotificationEnabled = true,
             isPremium = true,
         )
         assertTrue(state.showRequiredPermission)
-        assertFalse(state.showOptionalPermission)
         assertFalse(state.showCurrentPlayback)
-    }
-
-    @Test
-    fun revokingOptionalPermissionDoesNotAffectCorePlayback() {
-        val state = resolveHomePermissionPresentation(
-            requiredPermissionGranted = true,
-            optionalPermissionGranted = false,
-            requiresOptionalRuntimePermission = true,
-            statusNotificationEnabled = true,
-            isPremium = true,
-        )
-        assertFalse(state.showRequiredPermission)
-        assertTrue(state.showOptionalPermission)
-        assertTrue(state.showCurrentPlayback)
-    }
-
-    @Test
-    fun notificationBannerIsNotNeededOnAndroidVersionsWithoutRuntimePermission() {
-        val state = resolveHomePermissionPresentation(
-            requiredPermissionGranted = true,
-            optionalPermissionGranted = false,
-            requiresOptionalRuntimePermission = false,
-            statusNotificationEnabled = true,
-            isPremium = false,
-        )
-        assertFalse(state.showOptionalPermission)
-        assertTrue(state.showCurrentPlayback)
     }
 
     @Test

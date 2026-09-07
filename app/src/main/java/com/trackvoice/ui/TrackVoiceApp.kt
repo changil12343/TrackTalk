@@ -172,18 +172,22 @@ private const val CURRENT_PLAYBACK_ANNOUNCEMENT_ROW_TEST_TAG = "currentPlaybackA
 private const val CURRENT_PLAYBACK_READING_ROW_TEST_TAG = "currentPlaybackReadingRow"
 
 private val TrackVoiceCardShape = RoundedCornerShape(14.dp)
+private val HomeCardContentHorizontalInset = 24.dp
+private val TopLevelHeaderAdditionalTopPadding = 14.dp
 
 private object CurrentPlaybackCardSpacing {
-    val cardHorizontal = 24.dp
-    // IconButton keeps a 48dp touch target; 4dp here yields a visual title offset near 20dp.
-    val cardTop = 4.dp
+    val cardHorizontal = HomeCardContentHorizontalInset
+    // The header's 48dp icon target centers the title; this outer inset keeps
+    // the title visually clear of the card border without changing the target.
+    val cardTop = 16.dp
     val cardBottom = 16.dp
     val headingToFirstRow = 20.dp
     val metadataRowGap = 12.dp
     val metadataToDivider = 20.dp
-    // Settings rows keep a 48dp target; 8dp here plus their internal centering reads as 20dp.
-    val dividerToSettings = 8.dp
-    val settingsRowGap = 4.dp
+    // Keep the divider-to-action break distinct while the action rows retain
+    // their independent 48dp touch targets.
+    val dividerToSettings = 16.dp
+    val settingsRowGap = 0.dp
     val labelWidth = 96.dp
     val labelToValue = 12.dp
     val settingsChevronSize = 18.dp
@@ -255,14 +259,10 @@ fun TrackVoiceApp(viewModel: TrackVoiceViewModel, activity: Activity) {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {
-                TopAppBar(
-                    title = { Text(strings.sectionTitle(selectedSection)) },
-                    actions = {
-                        StatusBadge(
-                            enabled = mediaState.effectiveEnabled,
-                            notificationAccess = diagnostics.notificationListenerConnected,
-                        )
-                    },
+                TopLevelScreenHeader(
+                    title = strings.sectionTitle(selectedSection),
+                    enabled = mediaState.effectiveEnabled,
+                    notificationAccess = diagnostics.notificationListenerConnected,
                 )
             },
             bottomBar = {
@@ -300,6 +300,11 @@ fun TrackVoiceApp(viewModel: TrackVoiceViewModel, activity: Activity) {
                     onRequestNotificationPermission = {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                    },
+                    onToggleStatusNotification = { enabled ->
+                        viewModel.controller.updateUserSettings { current ->
+                            current.copy(showStatusNotification = enabled)
                         }
                     },
                     onOpenAnnouncementSettings = {
@@ -365,6 +370,32 @@ fun TrackVoiceApp(viewModel: TrackVoiceViewModel, activity: Activity) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun TopLevelScreenHeader(
+    title: String,
+    enabled: Boolean,
+    notificationAccess: Boolean,
+) {
+    Box(modifier = Modifier.padding(top = TopLevelHeaderAdditionalTopPadding)) {
+        TopAppBar(
+            title = {
+                Text(
+                    text = title,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            },
+            actions = {
+                StatusBadge(
+                    enabled = enabled,
+                    notificationAccess = notificationAccess,
+                )
+            },
+        )
+    }
+}
+
 @Composable
 private fun RowScope.NavigationItem(
     section: AppSection,
@@ -410,14 +441,12 @@ internal fun HomeScreen(
     onTogglePlayback: () -> Unit,
     onOpenPermission: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
+    onToggleStatusNotification: (Boolean) -> Unit,
     onOpenAnnouncementSettings: () -> Unit,
     onOpenPremium: () -> Unit,
 ) {
     val permissionPresentation = resolveHomePermissionPresentation(
         requiredPermissionGranted = notificationAccess,
-        optionalPermissionGranted = notificationPermissionGranted,
-        requiresOptionalRuntimePermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
-        statusNotificationEnabled = settings.showStatusNotification,
         isPremium = premiumState.isPremium,
     )
     LazyColumn(
@@ -437,9 +466,15 @@ internal fun HomeScreen(
                 RequiredPermissionBanner(onOpenPermission)
             }
         }
-        if (permissionPresentation.showOptionalPermission) {
+        if (!permissionPresentation.showRequiredPermission) {
             item {
-                NotificationPermissionBanner(onRequestNotificationPermission)
+                StatusNotificationCard(
+                    enabled = settings.showStatusNotification,
+                    permissionGranted = notificationPermissionGranted,
+                    requiresRuntimePermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                    onToggle = onToggleStatusNotification,
+                    onRequestPermission = onRequestNotificationPermission,
+                )
             }
         }
         item {
@@ -641,34 +676,22 @@ private fun PremiumBenefit(text: String) {
     }
 }
 
-internal fun shouldShowNotificationPermissionBanner(
+internal fun statusNotificationNeedsPermission(
     requiresRuntimePermission: Boolean,
     permissionGranted: Boolean,
-    statusNotificationEnabled: Boolean,
-    requiredPermissionGranted: Boolean = true,
-): Boolean = requiredPermissionGranted && requiresRuntimePermission && statusNotificationEnabled && !permissionGranted
+): Boolean = requiresRuntimePermission && !permissionGranted
 
 internal data class HomePermissionPresentation(
     val showRequiredPermission: Boolean,
-    val showOptionalPermission: Boolean,
     val showPremiumPromotion: Boolean,
     val showCurrentPlayback: Boolean,
 )
 
 internal fun resolveHomePermissionPresentation(
     requiredPermissionGranted: Boolean,
-    optionalPermissionGranted: Boolean,
-    requiresOptionalRuntimePermission: Boolean,
-    statusNotificationEnabled: Boolean,
     isPremium: Boolean,
 ): HomePermissionPresentation = HomePermissionPresentation(
     showRequiredPermission = !requiredPermissionGranted,
-    showOptionalPermission = shouldShowNotificationPermissionBanner(
-        requiresRuntimePermission = requiresOptionalRuntimePermission,
-        permissionGranted = optionalPermissionGranted,
-        statusNotificationEnabled = statusNotificationEnabled,
-        requiredPermissionGranted = requiredPermissionGranted,
-    ),
     showPremiumPromotion = requiredPermissionGranted && !isPremium,
     showCurrentPlayback = requiredPermissionGranted,
 )
@@ -684,61 +707,73 @@ internal fun homeStatusText(
 }
 
 @Composable
-internal fun NotificationPermissionBanner(onRequestPermission: () -> Unit) {
+internal fun StatusNotificationCard(
+    enabled: Boolean,
+    permissionGranted: Boolean,
+    requiresRuntimePermission: Boolean,
+    onToggle: (Boolean) -> Unit,
+    onRequestPermission: () -> Unit,
+) {
     val strings = LocalTrackTalkStrings.current
+    val needsPermission = statusNotificationNeedsPermission(
+        requiresRuntimePermission = requiresRuntimePermission,
+        permissionGranted = permissionGranted,
+    )
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = TrackVoiceCardShape,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+            containerColor = MaterialTheme.colorScheme.surface,
         ),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .padding(vertical = 10.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = HomeCardContentHorizontalInset),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        strings.notificationPermissionTitle,
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Text(
-                        strings.optionalPermissionBadge,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
                 Text(
-                    strings.notificationPermissionSummary,
+                    strings.statusShortcut,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    if (needsPermission) strings.statusShortcutPermissionSummary else strings.statusShortcutSummary,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            TextButton(
-                onClick = onRequestPermission,
-                modifier = Modifier.heightIn(min = 48.dp),
-            ) {
-                Text(strings.allowNotifications)
+            if (needsPermission) {
+                Box(modifier = Modifier.padding(end = 12.dp)) {
+                    TextButton(
+                        onClick = onRequestPermission,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) {
+                        Text(strings.permissionSettings)
+                    }
+                }
+            } else {
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = onToggle,
+                    modifier = Modifier.padding(end = 16.dp),
+                )
             }
         }
     }
 }
 
 @Composable
-private fun StatusCard(enabled: Boolean, effectiveEnabled: Boolean, onToggle: (Boolean) -> Unit) {
+internal fun StatusCard(enabled: Boolean, effectiveEnabled: Boolean, onToggle: (Boolean) -> Unit) {
     val strings = LocalTrackTalkStrings.current
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -752,15 +787,24 @@ private fun StatusCard(enabled: Boolean, effectiveEnabled: Boolean, onToggle: (B
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(vertical = 16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = HomeCardContentHorizontalInset),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
                 Text(strings.homeVoiceGuide, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(strings.statusSummary(effectiveEnabled, enabled))
             }
-            Switch(checked = enabled, onCheckedChange = onToggle)
+            Switch(
+                checked = enabled,
+                onCheckedChange = onToggle,
+                modifier = Modifier.padding(end = 16.dp),
+            )
         }
     }
 }
@@ -789,12 +833,13 @@ internal fun RequiredPermissionBanner(onOpenPermission: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Row(
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
                         strings.musicDetectionPermissionTitle,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f, fill = false),
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 2,
@@ -1144,9 +1189,6 @@ internal fun GeneralSettingsScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                SettingSwitchRow(strings.statusShortcut, strings.statusShortcutSummary, settings.showStatusNotification) { enabled ->
-                    onUpdate { current -> current.copy(showStatusNotification = enabled) }
-                }
             }
         }
         item {
@@ -1309,7 +1351,7 @@ internal fun DeviceSettingsScreen(
                         }
                         HorizontalDivider()
                     }
-                    Text(strings.autoEnable, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    Text(strings.screenAutomation, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     SettingSwitchRow(strings.screenOffEnable, strings.screenOffEnableSummary, settings.autoEnableOnScreenOff) { enabled ->
                         onUpdate { it.copy(autoEnableOnScreenOff = enabled) }
                     }
@@ -1353,12 +1395,10 @@ internal fun DeviceSettingsScreen(
 }
 
 @Composable
-private fun AppInfoCard(onFeedback: () -> Unit) {
+internal fun AppInfoCard(onFeedback: () -> Unit) {
     val strings = LocalTrackTalkStrings.current
     SettingCard(strings.appInfoTitle) {
         InfoRow(strings.versionLabel, "v${BuildConfig.VERSION_NAME}")
-        InfoRow(strings.buildNumberLabel, BuildConfig.VERSION_CODE.toString())
-        InfoRow(strings.developerLabel, strings.developerName)
         NavigationEntryContent(
             title = strings.feedbackDeveloper,
             summary = strings.feedbackDeveloperSummary,

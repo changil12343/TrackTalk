@@ -37,12 +37,13 @@ class HomePermissionMatrixInstrumentedTest {
     }
 
     @Test
-    fun requiredGrantedRevealsOnlyCompactOptionalPrompt() {
+    fun requiredGrantedShowsStatusPermissionActionInItsFinalHomeLocation() {
         setHome(requiredGranted = true, notificationGranted = false, premium = false)
 
         composeRule.onAllNodesWithText("음악 감지 권한 필요").assertCountEquals(0)
         composeRule.onNodeWithText("상단바 상태 알림").assertIsDisplayed()
-        composeRule.onNodeWithText("선택").assertIsDisplayed()
+        composeRule.onNodeWithText("알림을 표시하려면 권한이 필요합니다.").assertIsDisplayed()
+        composeRule.onNodeWithText("권한 설정").assertIsDisplayed()
         composeRule.onNodeWithText("TrackTalk Plus").assertIsDisplayed()
         composeRule.onNodeWithText("재생 중인 음악이 없습니다.").assertIsDisplayed()
         composeRule.onAllNodesWithText("권한을 설정하면 현재 재생 정보가 표시됩니다.").assertCountEquals(0)
@@ -53,7 +54,8 @@ class HomePermissionMatrixInstrumentedTest {
         setHome(requiredGranted = true, notificationGranted = true, premium = true)
 
         composeRule.onAllNodesWithText("음악 감지 권한 필요").assertCountEquals(0)
-        composeRule.onAllNodesWithText("상단바 상태 알림").assertCountEquals(0)
+        composeRule.onNodeWithText("상단바 상태 알림").assertIsDisplayed()
+        composeRule.onNodeWithText("현재 안내 상태를 상단바에서 확인합니다.").assertIsDisplayed()
         composeRule.onAllNodesWithText("TrackTalk Plus").assertCountEquals(0)
         composeRule.onNodeWithText("재생 중인 음악이 없습니다.").assertIsDisplayed()
     }
@@ -92,6 +94,7 @@ class HomePermissionMatrixInstrumentedTest {
                         onTogglePlayback = {},
                         onOpenPermission = {},
                         onRequestNotificationPermission = {},
+                        onToggleStatusNotification = {},
                         onOpenAnnouncementSettings = {},
                         onOpenPremium = {},
                     )

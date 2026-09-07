@@ -75,6 +75,7 @@ class EnglishLocalizationInstrumentedTest {
                         onTogglePlayback = {},
                         onOpenPermission = {},
                         onRequestNotificationPermission = {},
+                        onToggleStatusNotification = {},
                         onOpenAnnouncementSettings = {},
                         onOpenPremium = {},
                     )

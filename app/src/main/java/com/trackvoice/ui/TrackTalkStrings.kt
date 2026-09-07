@@ -29,7 +29,7 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
 
     fun sectionTitle(section: AppSection): String = when (section) {
         AppSection.HOME -> "TrackTalk"
-        AppSection.GENERAL -> t("안내·음성 설정", "Announcement & voice settings")
+        AppSection.GENERAL -> t("안내·음성", "Announcements & voice")
         AppSection.APPS -> t("앱 설정", "App settings")
         AppSection.DEVICES -> t("기기·진단", "Device & diagnostics")
         AppSection.DIAGNOSTICS -> t("진단", "Diagnostics")
@@ -103,14 +103,6 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
         else -> t("ON · 새 곡을 안내합니다.", "ON · Announces new tracks.")
     }
 
-    val notificationPermissionTitle: String get() = t("상단바 상태 알림", "Status notification")
-    val notificationPermissionSummary: String
-        get() = t(
-            "현재 안내 상태를 확인하고 빠르게 켜거나 끕니다.",
-            "See TrackTalk's current status and quickly turn announcements on or off.",
-        )
-    val optionalPermissionBadge: String get() = t("선택", "Optional")
-    val allowNotifications: String get() = t("허용", "Allow")
     val musicDetectionPermissionTitle: String get() = t("음악 감지 권한 필요", "Music detection")
     val musicDetectionPermissionSummary: String
         get() = t("재생 중인 곡을 확인하려면 권한을 허용해 주세요.", "Allow access so TrackTalk can detect the song currently playing.")
@@ -204,8 +196,13 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
     val statusShortcut: String get() = t("상단바 상태 알림", "Status notification")
     val statusShortcutSummary: String
         get() = t(
-            "현재 안내 상태를 확인하고 빠르게 켜거나 끕니다.",
-            "See TrackTalk's current status and quickly turn announcements on or off.",
+            "현재 안내 상태를 상단바에서 확인합니다.",
+            "See TrackTalk's current status in the status bar.",
+        )
+    val statusShortcutPermissionSummary: String
+        get() = t(
+            "알림을 표시하려면 권한이 필요합니다.",
+            "Notification permission is required to show it.",
         )
     val connectedDevices: String get() = t("연결 기기", "Connected devices")
     fun audioDeviceType(kind: AudioDeviceKind): String = when (kind) {
@@ -223,15 +220,15 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
         "Bluetooth·USB·HDMI 기기별 동작과 화면 꺼짐 자동 활성화를 설정할 수 있습니다.",
         "Configure Bluetooth, USB, and HDMI behavior plus screen-off auto-enable.",
     )
-    val deviceAutomationSummary: String get() = t("기기별로 안내 사용과 자동 켜짐을 정할 수 있습니다.", "Choose announcement and auto-enable behavior per device.")
+    val deviceAutomationSummary: String get() = t("기기별 안내와 자동 켜짐을 설정합니다.", "Set announcements and auto-enable for each device.")
     val noConnectedDevices: String get() = t("연결된 이어폰이나 Bluetooth 기기가 없습니다.", "No headphones or Bluetooth devices are connected.")
     val diagnosticsSummary: String get() = t("알림 접근, 미디어 감지, 음성 엔진 상태를 확인합니다.", "Check notification access, media detection, and the voice engine.")
     val openDiagnostics: String get() = t("진단 열기", "Open diagnostics")
     val backToDevices: String get() = t("기기·진단으로 돌아가기", "Back to devices & diagnostics")
     val useOnThisDevice: String get() = t("이 기기에서 사용", "Use on this device")
-    val useOnThisDeviceSummary: String get() = t("연결 중인 이 기기에 안내합니다.", "Announce through this connected device.")
-    val autoEnableOnConnect: String get() = t("연결하면 자동 켜기", "Enable when connected")
-    val autoEnableOnConnectSummary: String get() = t("이 기기가 연결되면 안내를 켭니다.", "Enable announcements when this device connects.")
+    val useOnThisDeviceSummary: String get() = t("이 기기에서 안내합니다.", "Announce on this device.")
+    val autoEnableOnConnect: String get() = t("연결 시 자동 켜기", "Auto-enable on connect")
+    val autoEnableOnConnectSummary: String get() = t("연결되면 안내를 켭니다.", "Enable announcements when it connects.")
     val trackGuide: String get() = t("기본 안내", "Basic announcements")
     val guideDefaultsSummary: String get() = t("현재 안내 설정", "Current settings")
     val trackStart: String get() = t("재생 시작", "When playback starts")
@@ -305,13 +302,13 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
         "Tap to select · long-press to reorder",
     )
     val detailedGuidePlusTitle: String get() = t("상세 안내 설정", "Detailed guide settings")
-    val autoEnable: String get() = t("자동 켜기", "Auto enable")
-    val screenOffEnable: String get() = t("화면이 꺼지면 켜기", "Enable when screen turns off")
-    val screenOffEnableSummary: String get() = t("화면을 끄면 안내를 시작합니다.", "Start announcements when the screen turns off.")
-    val screenOnRestore: String get() = t("화면을 켜면 원래대로", "Restore when screen turns on")
-    val screenOnRestoreSummary: String get() = t("화면을 켜면 자동 상태를 해제합니다.", "Disable the automatic state when the screen turns on.")
-    val bluetoothOnly: String get() = t("화면이 꺼질 때 Bluetooth에서만 자동 켜기", "Auto-enable on Bluetooth when the screen turns off")
-    val bluetoothOnlySummary: String get() = t("화면이 꺼질 때 Bluetooth 오디오가 연결된 경우에만 안내를 자동으로 켭니다.", "Enable only when Bluetooth audio is connected as the screen turns off.")
+    val screenAutomation: String get() = t("화면 자동화", "Screen automation")
+    val screenOffEnable: String get() = t("화면 끄면 자동 켜기", "Auto-enable when screen turns off")
+    val screenOffEnableSummary: String get() = t("화면이 꺼지면 안내를 켭니다.", "Enable announcements when the screen turns off.")
+    val screenOnRestore: String get() = t("화면 켜면 원래대로", "Restore on wake")
+    val screenOnRestoreSummary: String get() = t("자동으로 켜진 안내를 해제합니다.", "Turn off automatically enabled announcements.")
+    val bluetoothOnly: String get() = t("화면 끄면 Bluetooth에서만 켜기", "Screen-off auto-enable with Bluetooth")
+    val bluetoothOnlySummary: String get() = t("Bluetooth가 연결된 경우에만 안내를 켭니다.", "Enable announcements only when Bluetooth is connected.")
 
     val appsIntro: String get() = t(
         "앱별로 TrackTalk 사용 여부만 선택합니다.",
@@ -403,13 +400,9 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
     val lastAnnouncement: String get() = t("마지막 안내", "Last announcement")
     val announcementTime: String get() = t("안내 시각", "Announcement time")
     val appInfoTitle: String get() = t("앱 정보", "App info")
-    val appInfoSummary: String get() = t("TrackTalk의 버전과 개발자 정보를 확인할 수 있습니다.", "Check the TrackTalk version and developer information.")
     val versionLabel: String get() = t("버전", "Version")
-    val buildNumberLabel: String get() = t("빌드 번호", "Build number")
-    val developerLabel: String get() = t("개발자", "Developer")
-    val developerName: String get() = "yiri20"
-    val feedbackDeveloper: String get() = t("개발자에게 피드백 보내기", "Send feedback")
-    val feedbackDeveloperSummary: String get() = t("의견이나 문제를 이메일로 보내 주세요.", "Share an idea or report a problem by email.")
+    val feedbackDeveloper: String get() = t("피드백 보내기", "Send feedback")
+    val feedbackDeveloperSummary: String get() = t("의견이나 문제를 이메일로 보내 주세요.", "Send feedback or report a problem by email.")
     val noEmailApp: String get() = t("사용할 수 있는 이메일 앱이 없습니다.", "No compatible email app is available.")
     val privacy: String get() = t("개인정보", "Privacy")
     val privacySummary: String get() = t("곡 정보는 안내에만 사용하며 서버에 저장하지 않습니다.", "Track information is used only for announcements and is not stored on a server.")

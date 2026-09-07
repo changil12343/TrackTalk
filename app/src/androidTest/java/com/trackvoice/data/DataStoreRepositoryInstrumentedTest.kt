@@ -108,6 +108,23 @@ class DataStoreRepositoryInstrumentedTest {
     }
 
     @Test
+    fun statusNotificationPreferenceSurvivesRepositoryRecreation() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = DataStoreRepository(context)
+        val original = repository.currentUserSettings()
+
+        try {
+            repository.updateUserSettings { it.copy(showStatusNotification = false) }
+            assertFalse(DataStoreRepository(context).currentUserSettings().showStatusNotification)
+
+            repository.updateUserSettings { it.copy(showStatusNotification = true) }
+            assertTrue(DataStoreRepository(context).currentUserSettings().showStatusNotification)
+        } finally {
+            repository.updateUserSettings { original }
+        }
+    }
+
+    @Test
     fun appEnablementDefaultsAndExplicitChoicesSurviveRepositoryRecreation() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val repository = DataStoreRepository(context)

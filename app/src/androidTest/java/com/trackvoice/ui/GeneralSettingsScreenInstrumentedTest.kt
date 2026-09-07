@@ -43,6 +43,30 @@ class GeneralSettingsScreenInstrumentedTest {
     val composeRule = createAndroidComposeRule<TrackTalkComposeTestActivity>()
 
     @Test
+    fun statusNotificationControlIsNoLongerInAnnouncementAndVoiceSettings() {
+        composeRule.setContent {
+            TrackVoiceTheme {
+                CompositionLocalProvider(
+                    LocalTrackTalkStrings provides TrackTalkStrings.forLanguage(
+                        AppLanguage.KOREAN,
+                        "en",
+                    ),
+                ) {
+                    GeneralSettingsScreen(
+                        settings = UserSettings(appLanguage = AppLanguage.KOREAN),
+                        isPremium = true,
+                        onUpdate = {},
+                        onOpenPremium = {},
+                    )
+                }
+            }
+        }
+
+        composeRule.onNodeWithText("기본 동작").assertIsDisplayed()
+        composeRule.onNodeWithText("상단바 상태 알림").assertDoesNotExist()
+    }
+
+    @Test
     fun selectingMusicDuringGuideShowsPauseOptionAndPersistsIt() {
         var settings by mutableStateOf(
             UserSettings(

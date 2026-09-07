@@ -7,7 +7,7 @@ state.
 ## Current application identity
 
 - Application ID and namespace: `com.trackvoice`.
-- Current release version: `0.1.0` (`versionCode` 1).
+- Current release version: `1.0.0` (`versionCode` 1).
 - Release shrinking/minification is disabled. The default optimized ProGuard
   file and `app/proguard-rules.pro` are declared but R8 does not shrink the
   current release build.
@@ -15,10 +15,9 @@ state.
 - A release build is unsigned unless complete upload-key credentials are
   supplied.
 
-Do not change the version only to prepare signing. Before the first Play
-upload, the operator must decide whether the product version remains `0.1.0`
-or becomes `1.0.0`. The repository cannot establish whether `versionCode` 1
-has already been uploaded to Play Console.
+This source finalizes the first Play upload as `1.0.0` (`versionCode` 1). If
+the operator finds that `versionCode` 1 has already been uploaded in Play
+Console, stop and choose a new higher version code; never reuse it.
 
 ## Credential inputs
 
