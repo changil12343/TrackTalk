@@ -100,6 +100,33 @@ class PlaybackOccurrenceBoundaryPolicyTest {
         assertTrue(harness.observe(track.copy(playbackPosition = 0L), "ytm-session"))
     }
 
+    @Test
+    fun stoppedBoundaryDoesNotAuthorizeStaleSameTrackAtNonStartPosition() {
+        val track = track("A")
+        val harness = announcedHarness(track)
+        harness.boundary = PlaybackOccurrenceBoundary(
+            "ytm-session",
+            track.copy(playbackState = PlaybackStatus.STOPPED, playbackPosition = 555L),
+        )
+
+        // YouTube Music can briefly publish the former A as PLAYING at its
+        // old position while a direct selection is resolving B. That frame is
+        // not a new A occurrence and must not start an announcement/PAUSE.
+        assertFalse(harness.observe(track.copy(playbackPosition = 3_205L), "ytm-session"))
+    }
+
+    @Test
+    fun stoppedBoundaryDoesNotAuthorizeSameTrackWhenStartPositionIsUnknown() {
+        val track = track("A")
+        val harness = announcedHarness(track)
+        harness.boundary = PlaybackOccurrenceBoundary(
+            "ytm-session",
+            track.copy(playbackState = PlaybackStatus.STOPPED),
+        )
+
+        assertFalse(harness.observe(track.copy(playbackPosition = null), "ytm-session"))
+    }
+
     private class Harness {
         private val suppressor = DuplicateSuppressor()
         var boundary: PlaybackOccurrenceBoundary? = null

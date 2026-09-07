@@ -108,8 +108,11 @@ same-track restart remains eligible. This guard validates identity only: it
 does not pause, duck, seek, or otherwise control playback.
 
 Same-track restart eligibility exists only after an explicit `STOPPED`
-snapshot and is scoped to that exact framework session and logical/core track.
-An empty active-session refresh, listener teardown, session replacement, or a
+snapshot, a fresh `PLAYING` position near the start of the track, and is scoped
+to that exact framework session and logical/core track. A later-position
+same-track snapshot after `STOPPED` can be stale provider state while a direct
+selection settles, so it is baseline-only rather than a new occurrence. An
+empty active-session refresh, listener teardown, session replacement, or a
 `STOPPED` snapshot from another media session cannot lend that eligibility to
 the current player. Losing that exact session discards the boundary; it does
 not turn a later same-track baseline into a new occurrence.
@@ -149,10 +152,16 @@ invalidates the lease without sending `PLAY`.
 
 Replayed states with the same framework update timestamp remain harmless
 controller churn. Once TrackTalk's own pause is acknowledged, an observable
-newer `PLAYING` or `PAUSED` state disqualifies the pending automatic restore.
-`STOPPED` and `NONE` always disqualify it. If a `PAUSED` transition cannot be
-attributed to the pause command carried by the lease, TrackTalk fails safe and
-does not play.
+effective transition to `PLAYING`, or `STOPPED`/`NONE`, disqualifies the pending
+automatic restore. A repeated `PAUSED` state cannot establish another pause
+command: `MediaSession` exposes state, not pause-command provenance.
+
+A post-acknowledgement metadata, queue, or reconciliation snapshot — and even
+a repeated `PAUSED` playback-state callback — can expose a refreshed provider
+timestamp without proving a new pause command. It does not cancel an owned
+lease. If a source resumes during TTS, the observable `PLAYING` transition
+cancels automatic restore before any later user pause can be overwritten. This
+prevents provider callback churn from stranding a source that TrackTalk paused.
 
 TrackTalk cancels automatic restoration when a newer playback intent can be
 observed. Redundant pause commands issued while the source is already paused

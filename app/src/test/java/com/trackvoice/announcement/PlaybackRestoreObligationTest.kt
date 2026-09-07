@@ -333,7 +333,7 @@ class PlaybackRestoreObligationTest {
     }
 
     @Test
-    fun newerUserPauseDuringTtsSuppressesAutomaticRestore() {
+    fun repeatedPausedPlaybackStateCallbackDuringTtsDoesNotCancelRestore() {
         val obligation = armed()
         val lease = obligation.activeLease()!!
         assertEquals(
@@ -341,10 +341,37 @@ class PlaybackRestoreObligationTest {
             obligation.observePauseCallback(lease.id, 200L, 180L),
         )
         assertEquals(
-            PlaybackRestorePlayerObservation.NEWER_PAUSE_OR_STOP_INTENT,
+            PlaybackRestorePlayerObservation.DUPLICATE_OR_STALE,
             obligation.observePauseCallback(lease.id, 300L, 280L, eventSequenceNumber = 3L),
         )
-        assertNull(obligation.markTtsCompleted(lease.id, PlaybackRestoreTrigger.TTS_COMPLETED))
+        assertNull(obligation.newerPlaybackIntentReason(lease.id))
+        assertSame(lease, obligation.markTtsCompleted(lease.id, PlaybackRestoreTrigger.TTS_COMPLETED))
+        assertSame(lease, obligation.claimRestoreIfReady(lease.id))
+    }
+
+    @Test
+    fun postAcknowledgementQueueRefreshOfPausedSnapshotDoesNotCancelRestore() {
+        val obligation = armed()
+        val lease = obligation.activeLease()!!
+        assertEquals(
+            PlaybackRestorePlayerObservation.OWNED_PAUSE_CONFIRMED,
+            obligation.observePauseCallback(lease.id, 200L, 180L),
+        )
+
+        assertEquals(
+            PlaybackRestorePlayerObservation.DUPLICATE_OR_STALE,
+            obligation.observePlayerState(
+                cycleId = lease.id,
+                playbackStatus = PlaybackStatus.PAUSED,
+                observedAtElapsedNanos = 300L,
+                stateUpdatedAtElapsedNanos = 280L,
+                isPlaybackStateCallback = false,
+                eventSequenceNumber = 3L,
+            ),
+        )
+        assertNull(obligation.newerPlaybackIntentReason(lease.id))
+        assertSame(lease, obligation.markTtsCompleted(lease.id, PlaybackRestoreTrigger.TTS_COMPLETED))
+        assertSame(lease, obligation.claimRestoreIfReady(lease.id))
     }
 
     @Test

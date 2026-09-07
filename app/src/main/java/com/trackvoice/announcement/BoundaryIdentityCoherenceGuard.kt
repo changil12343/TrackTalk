@@ -27,7 +27,7 @@ internal class BoundaryIdentityCoherenceGuard(
         val applicable = hardBoundaryPending &&
             sameSessionRestartAllowed &&
             sameTrackAsAccepted &&
-            (currentPositionMs == null || currentPositionMs <= START_POSITION_WINDOW_MS)
+            PlaybackOccurrenceBoundaryPolicy.hasRestartStartPosition(currentPositionMs)
         if (!applicable) {
             pending = null
             return BoundaryIdentityDecision.NOT_APPLICABLE
@@ -57,7 +57,6 @@ internal class BoundaryIdentityCoherenceGuard(
     )
 
     private companion object {
-        const val START_POSITION_WINDOW_MS = 2_000L
         const val DEFAULT_CONFIRMATION_WINDOW_NANOS = 600L * 1_000_000L
     }
 }

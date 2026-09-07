@@ -146,9 +146,10 @@ internal class PlaybackRestoreObligation {
      * Classifies ordered player states while TrackTalk owns a pause.
      *
      * The first matching, locally ordered PAUSED callback acknowledges
-     * TrackTalk's command. A later PLAYING state, or a genuinely newer
-     * PAUSED/STOPPED state, is newer player/user intent. Provider timestamps
-     * are diagnostic/auxiliary stale evidence, not command provenance.
+     * TrackTalk's command. A later effective PLAYING state or terminal
+     * STOPPED/NONE state is newer player/user intent. PAUSED -> PAUSED
+     * callbacks do not expose pause-command provenance, even when their
+     * provider timestamp changes.
      */
     fun observePlayerState(
         cycleId: Long,
@@ -236,25 +237,12 @@ internal class PlaybackRestoreObligation {
             return PlaybackRestorePlayerObservation.OWNED_PAUSE_CONFIRMED
         }
 
-        val baseline = cycle.playingStateUpdatedAtElapsedNanos
-            ?: cycle.pausedStateUpdatedAtElapsedNanos
-        val fallbackBaseline = cycle.playingObservedAfterOwnedPauseAtElapsedNanos
-            ?: cycle.pausedObservedAtElapsedNanos
-            ?: return PlaybackRestorePlayerObservation.DUPLICATE_OR_STALE
-        if (stateUpdatedAtElapsedNanos == null && cycle.playingObservedAfterOwnedPauseAtElapsedNanos == null) {
-            return PlaybackRestorePlayerObservation.DUPLICATE_OR_STALE
-        }
-        if (!isNewerState(stateUpdatedAtElapsedNanos, baseline, observedAtElapsedNanos, fallbackBaseline)) {
-            return PlaybackRestorePlayerObservation.DUPLICATE_OR_STALE
-        }
-
-        val reason = if (cycle.playingObservedAfterOwnedPauseAtElapsedNanos != null) {
-            "PAUSED_AFTER_INTERVENING_PLAYBACK"
-        } else {
-            "NEWER_PAUSED_STATE_AFTER_OWNED_PAUSE"
-        }
-        markNewerIntent(cycle, observedAtElapsedNanos, reason)
-        return PlaybackRestorePlayerObservation.NEWER_PAUSE_OR_STOP_INTENT
+        // MediaSession reports state, not the command that produced it. After
+        // TrackTalk has an attributable PAUSED acknowledgement, PAUSED ->
+        // PAUSED callbacks (including ones with a newer provider timestamp)
+        // cannot prove a newer user/source pause. An effective transition to
+        // PLAYING or a terminal state is handled separately as newer intent.
+        return PlaybackRestorePlayerObservation.DUPLICATE_OR_STALE
     }
 
     private fun observePlaying(

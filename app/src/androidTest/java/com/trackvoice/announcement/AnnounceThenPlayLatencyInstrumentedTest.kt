@@ -331,6 +331,72 @@ class AnnounceThenPlayLatencyInstrumentedTest {
     }
 
     @Test
+    fun directSelectionDoesNotPauseStalePreviousTrackBeforeNewTrackIsPlaying() {
+        configureAndEnableAnnouncementMode(MusicTreatment.PAUSE)
+        val playerController = MediaController(context, session.sessionToken)
+        var previousAnnouncementAt = controller.diagnostics.value.lastAnnouncementAt ?: 0L
+
+        // Establish an already-announced A occurrence, as on the physical
+        // device before the user taps a different song in YouTube Music.
+        publishTrack(1)
+        waitUntil(timeoutMs = 8_000L) {
+            val diagnostics = controller.diagnostics.value
+            diagnostics.lastAnnouncementAt?.let { it > previousAnnouncementAt } == true &&
+                diagnostics.lastAnnouncementSucceeded == true &&
+                pauseCount.get() == 1 &&
+                playCount.get() == 1 &&
+                playerController.playbackState?.state == PlaybackState.STATE_PLAYING
+        }
+        previousAnnouncementAt = requireNotNull(controller.diagnostics.value.lastAnnouncementAt)
+
+        // Direct selection can expose STOPPED A, then a stale old A PLAYING
+        // snapshot at a non-start position, before B's metadata and PLAYING
+        // state arrive. The stale frame must remain duplicate-only: no owned
+        // pause, lease, or TTS may be created for it.
+        setPlaybackState(PlaybackState.STATE_STOPPED, 1L, positionMs = 555L)
+        setPlaybackState(PlaybackState.STATE_PLAYING, 1L, positionMs = 3_205L)
+        waitUntil {
+            controller.mediaState.value.currentEvent?.let { event ->
+                event.mediaId == TRACKS[1].mediaId &&
+                    (event.playbackPosition ?: 0L) >= 3_205L
+            } == true
+        }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        assertEquals("stale previous track must not be paused", 1, pauseCount.get())
+        assertEquals("stale previous track must not be restored", 1, playCount.get())
+        assertEquals(previousAnnouncementAt, controller.diagnostics.value.lastAnnouncementAt)
+
+        // The selected B may arrive with metadata while PAUSED. It has not
+        // yet supplied a playable transition, so TrackTalk must still issue
+        // no transport command. Once B reaches PLAYING it gets one ordinary
+        // PAUSE -> TTS -> PLAY transaction.
+        setPlaybackState(PlaybackState.STATE_PAUSED, 2L, positionMs = 0L)
+        publishMetadata(2)
+        waitUntil {
+            controller.mediaState.value.currentEvent?.let { event ->
+                event.mediaId == TRACKS[2].mediaId && !event.isPlaying
+            } == true
+        }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        assertEquals("metadata-first B must not be paused", 1, pauseCount.get())
+        assertEquals("metadata-first B must not be restored", 1, playCount.get())
+        assertEquals(previousAnnouncementAt, controller.diagnostics.value.lastAnnouncementAt)
+
+        setPlaybackState(PlaybackState.STATE_PLAYING, 2L, positionMs = 0L)
+        waitUntil(timeoutMs = 8_000L) {
+            val diagnostics = controller.diagnostics.value
+            diagnostics.lastAnnouncementAt?.let { it > previousAnnouncementAt } == true &&
+                diagnostics.lastAnnouncementSucceeded == true &&
+                pauseCount.get() == 2 &&
+                playCount.get() == 2 &&
+                playerController.playbackState?.state == PlaybackState.STATE_PLAYING
+        }
+        assertEquals("new B must be announced once after PLAYING", 2, pauseCount.get())
+        assertEquals("new B must restore once after PLAYING", 2, playCount.get())
+        assertEquals(PlaybackState.STATE_PLAYING, playerController.playbackState?.state)
+    }
+
+    @Test
     fun notificationReconciliationRaceAnnouncesOneNewTrackWithoutExtraTransport() {
         configureAndEnableAnnouncementMode(MusicTreatment.KEEP)
         val playerController = MediaController(context, session.sessionToken)
@@ -435,6 +501,12 @@ class AnnounceThenPlayLatencyInstrumentedTest {
 
     private fun publishTrack(index: Int) {
         val track = TRACKS[index]
+        publishMetadata(index)
+        setPlaybackState(PlaybackState.STATE_PLAYING, index.toLong())
+    }
+
+    private fun publishMetadata(index: Int) {
+        val track = TRACKS[index]
         session.setMetadata(
             MediaMetadata.Builder()
                 .putString(MediaMetadata.METADATA_KEY_MEDIA_ID, track.mediaId)
@@ -444,13 +516,12 @@ class AnnounceThenPlayLatencyInstrumentedTest {
                 .putLong(MediaMetadata.METADATA_KEY_DURATION, 180_000L)
                 .build(),
         )
-        setPlaybackState(PlaybackState.STATE_PLAYING, index.toLong())
     }
 
-    private fun setPlaybackState(state: Int, activeQueueItemId: Long) {
+    private fun setPlaybackState(state: Int, activeQueueItemId: Long, positionMs: Long = 0L) {
         session.setPlaybackState(
             PlaybackState.Builder()
-                .setState(state, 0L, 1f)
+                .setState(state, positionMs, 1f)
                 .setActiveQueueItemId(activeQueueItemId)
                 .setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE)
                 .build(),
