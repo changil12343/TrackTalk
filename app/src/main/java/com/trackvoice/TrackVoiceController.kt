@@ -101,6 +101,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class MediaUiState(
     val currentEvent: PlaybackEvent? = null,
@@ -126,6 +127,18 @@ private data class QueuedMediaUpdate(
     val monitorGeneration: Long,
     val update: MediaMonitorUpdate,
 )
+
+/** Thread-safe handoff from Android's TTS callback thread to the main-owned restore state. */
+private class PlaybackRestoreTtsStartSignal(
+    val cycleId: Long,
+    val speechGeneration: Long,
+) {
+    private val started = AtomicBoolean(false)
+
+    fun markStarted(): Boolean = started.compareAndSet(false, true)
+
+    fun hasStarted(): Boolean = started.get()
+}
 
 private fun PlaybackEvent.logicalIdentity(): String = listOf(
     sourcePackageName,
@@ -579,6 +592,9 @@ class TrackVoiceController(
         val speechCycleId = cycleId?.takeIf { id ->
             playbackRestoreObligation.bindSpeech(id, generation)
         }
+        val speechStartSignal = speechCycleId?.let { id ->
+            PlaybackRestoreTtsStartSignal(id, generation)
+        }
         if (cycleId != null && speechCycleId == null) {
             cancelPlaybackRestoreWithoutResume("SPEECH_TRANSACTION_REPLACED")
         }
@@ -586,6 +602,7 @@ class TrackVoiceController(
             schedulePlaybackRestoreWatchdog(
                 cycleId = speechCycleId,
                 timeoutMs = PlaybackRestoreWatchdogPolicy.timeoutMs(text.length, settings.speechRate),
+                ttsStartSignal = speechStartSignal,
             )
             logRestoreCycle(speechCycleId, "TTS_REQUESTED", _mediaState.value.currentEvent)
         }
@@ -595,6 +612,7 @@ class TrackVoiceController(
             voiceNameOverride = voiceNameOverride,
             announcementCycleId = speechCycleId,
             latencyCycleId = manualTraceId,
+            onStarted = speechStartSignal?.let { signal -> { onOwnedTtsStarted(signal) } },
         ) { success, message ->
             if (generation == speechGeneration) {
                 if (shouldRequestAudioFocus) audioFocusManager.abandon()
@@ -640,6 +658,9 @@ class TrackVoiceController(
         val speechCycleId = cycleId?.takeIf { id ->
             playbackRestoreObligation.bindSpeech(id, generation)
         }
+        val speechStartSignal = speechCycleId?.let { id ->
+            PlaybackRestoreTtsStartSignal(id, generation)
+        }
         if (cycleId != null && speechCycleId == null) {
             cancelPlaybackRestoreWithoutResume("SPEECH_TRANSACTION_REPLACED")
         }
@@ -647,6 +668,7 @@ class TrackVoiceController(
             schedulePlaybackRestoreWatchdog(
                 cycleId = speechCycleId,
                 timeoutMs = PlaybackRestoreWatchdogPolicy.timeoutMs(text.length, settings.speechRate),
+                ttsStartSignal = speechStartSignal,
             )
             logRestoreCycle(speechCycleId, "TTS_REQUESTED", track)
         }
@@ -658,6 +680,7 @@ class TrackVoiceController(
             preparedVoicePlan = preparedVoicePlan,
             announcementCycleId = speechCycleId,
             latencyCycleId = latencyCycleId,
+            onStarted = speechStartSignal?.let { signal -> { onOwnedTtsStarted(signal) } },
         ) { success, message ->
             if (generation == speechGeneration) {
                 activeSpeechTrack = null
@@ -1108,6 +1131,45 @@ class TrackVoiceController(
         )
     }
 
+    /**
+     * Android's onStart may arrive from a TTS binder thread. The signal is
+     * marked before this main-thread handoff so a queued duration watchdog
+     * cannot invalidate the same owned lease in between.
+     */
+    private fun onOwnedTtsStarted(signal: PlaybackRestoreTtsStartSignal) {
+        if (!signal.markStarted()) return
+        scope.launch {
+            val cycle = playbackRestoreObligation.markTtsStarted(
+                cycleId = signal.cycleId,
+                generation = signal.speechGeneration,
+            ) ?: run {
+                TrackTalkDebugLog.event(
+                    "STALE_TTS_START_DROPPED",
+                    "announcementGeneration" to signal.cycleId,
+                    "speechGeneration" to signal.speechGeneration,
+                    "currentSpeechGeneration" to speechGeneration,
+                )
+                return@launch
+            }
+            // A real Android TTS start replaces the text-length estimate with
+            // authoritative lifecycle completion for this owned transaction.
+            playbackRestoreWatchdogJob?.cancel()
+            playbackRestoreWatchdogJob = null
+            TrackTalkDebugLog.event(
+                "RESTORE_TTS_STARTED",
+                "announcementGeneration" to cycle.id,
+                "controllerGeneration" to cycle.controllerGeneration,
+                "speechGeneration" to signal.speechGeneration,
+            )
+            logRestoreCycle(
+                cycleId = cycle.id,
+                stage = "TTS_STARTED",
+                event = cycle.track,
+                reason = "ANDROID_UTTERANCE_STARTED",
+            )
+        }
+    }
+
     private fun handlePlaybackRestoreEvent(event: PlaybackRestoreEvent) {
         val cycleId = event.announcementCycleId ?: return
         val activeCycle = playbackRestoreObligation.activeLease()?.takeIf { it.id == cycleId }
@@ -1219,10 +1281,29 @@ class TrackVoiceController(
         )
     }
 
-    private fun schedulePlaybackRestoreWatchdog(cycleId: Long, timeoutMs: Long) {
+    private fun schedulePlaybackRestoreWatchdog(
+        cycleId: Long,
+        timeoutMs: Long,
+        ttsStartSignal: PlaybackRestoreTtsStartSignal? = null,
+    ) {
         playbackRestoreWatchdogJob?.cancel()
         playbackRestoreWatchdogJob = scope.launch {
             delay(timeoutMs)
+            if (
+                ttsStartSignal?.hasStarted() == true ||
+                !playbackRestoreObligation.shouldExpireUnstartedSpeechWatchdog(
+                    cycleId = cycleId,
+                    speechGeneration = ttsStartSignal?.speechGeneration,
+                )
+            ) {
+                TrackTalkDebugLog.event(
+                    "RESTORE_WATCHDOG_IGNORED",
+                    "announcementGeneration" to cycleId,
+                    "speechGeneration" to ttsStartSignal?.speechGeneration,
+                    "reason" to "TTS_STARTED_OR_SUPERSEDED",
+                )
+                return@launch
+            }
             val cycle = playbackRestoreObligation.activeLease()?.takeIf { it.id == cycleId } ?: return@launch
             logRestoreCycle(
                 cycleId = cycle.id,

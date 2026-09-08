@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 private fun Long?.elapsedMillisUntil(endElapsedNanos: Long): Double? = this?.let { start ->
     (endElapsedNanos - start).coerceAtLeast(0L) / 1_000_000.0
@@ -203,6 +204,7 @@ class TtsEngine internal constructor(
         voiceNameOverride: String? = null,
         announcementCycleId: Long? = null,
         latencyCycleId: String? = null,
+        onStarted: (() -> Unit)? = null,
         onFinished: (success: Boolean, message: DiagnosticMessage) -> Unit,
     ) = speakWithVoicePlan(
         text = text,
@@ -213,6 +215,7 @@ class TtsEngine internal constructor(
         preparedVoicePlan = null,
         announcementCycleId = announcementCycleId,
         latencyCycleId = latencyCycleId,
+        onStarted = onStarted,
         onFinished = onFinished,
     )
 
@@ -225,6 +228,7 @@ class TtsEngine internal constructor(
         preparedVoicePlan: PreparedTtsVoicePlan?,
         announcementCycleId: Long? = null,
         latencyCycleId: String? = null,
+        onStarted: (() -> Unit)? = null,
         onFinished: (success: Boolean, message: DiagnosticMessage) -> Unit,
     ) {
         val requestId = warmPathObserver?.let { "trackvoice-request-${System.nanoTime()}" }
@@ -346,6 +350,7 @@ class TtsEngine internal constructor(
                 params = params,
                 requestId = requestId,
                 transitionAtMs = transitionAtMs,
+                onStarted = onStarted,
                 callback = onFinished,
                 announcementCycleId = announcementCycleId,
                 latencyCycleId = latencyCycleId,
@@ -652,6 +657,7 @@ class TtsEngine internal constructor(
         val params: Bundle,
         val requestId: String?,
         val transitionAtMs: Long?,
+        val onStarted: (() -> Unit)?,
         val callback: (Boolean, DiagnosticMessage) -> Unit,
         val announcementCycleId: Long? = null,
         val latencyCycleId: String? = null,
@@ -661,6 +667,7 @@ class TtsEngine internal constructor(
         var genderFallbackUsed: Boolean = false,
         var completed: Boolean = false,
         var latencyTerminalLogged: Boolean = false,
+        val started: AtomicBoolean = AtomicBoolean(false),
     )
 
     private val pendingResults = mutableMapOf<String, PendingBatch>()
@@ -673,6 +680,9 @@ class TtsEngine internal constructor(
         override fun onStart(utteranceId: String?) {
             val startedAtNanos = SystemClock.elapsedRealtimeNanos()
             val batch = utteranceId?.let(pendingResults::get)
+            if (batch != null && batch.started.compareAndSet(false, true)) {
+                runCatching { batch.onStarted?.invoke() }
+            }
             utteranceId?.let { id ->
                 utteranceRequestIds[id]?.let { requestId ->
                     reportWarmPath(

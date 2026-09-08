@@ -72,6 +72,8 @@ internal data class PlaybackRestoreLease(
     val trackTalkActuallyPausedPlayback: Boolean = true,
     var state: PlaybackRestoreCycleState = PlaybackRestoreCycleState.ARMED,
     var speechGeneration: Long? = null,
+    /** Android has delivered an actual utterance-start callback for the bound speech. */
+    var ttsStarted: Boolean = false,
     /** A current TTS success/error/interruption has reached this transaction. */
     var ttsCompleted: Boolean = false,
     /** A matching post-command PAUSED update acknowledged TrackTalk's pause. */
@@ -137,6 +139,39 @@ internal class PlaybackRestoreObligation {
         if (cycle.speechGeneration != null && cycle.speechGeneration != generation) return false
         cycle.speechGeneration = generation
         return true
+    }
+
+    /**
+     * Records the authoritative Android utterance-start boundary for a bound
+     * speech transaction. From this point the terminal TTS lifecycle, rather
+     * than a text-length estimate, governs the owned restore lease.
+     */
+    fun markTtsStarted(cycleId: Long, generation: Long): PlaybackRestoreLease? {
+        val cycle = active?.takeIf { it.id == cycleId } ?: return null
+        if (!cycle.trackTalkActuallyPausedPlayback) return null
+        if (cycle.state != PlaybackRestoreCycleState.ARMED) return null
+        if (cycle.speechGeneration != generation) return null
+        if (cycle.ttsCompleted || cycle.newerPlaybackIntentReason != null) return null
+        cycle.ttsStarted = true
+        return cycle
+    }
+
+    /**
+     * The request-to-start watchdog may clean up only an unstarted, current
+     * speech transaction. A queued watchdog must never invalidate a lease once
+     * Android has reported that its speech actually started.
+     */
+    fun shouldExpireUnstartedSpeechWatchdog(
+        cycleId: Long,
+        speechGeneration: Long?,
+    ): Boolean {
+        val cycle = active?.takeIf { it.id == cycleId } ?: return false
+        return cycle.trackTalkActuallyPausedPlayback &&
+            cycle.state == PlaybackRestoreCycleState.ARMED &&
+            cycle.speechGeneration == speechGeneration &&
+            !cycle.ttsStarted &&
+            !cycle.ttsCompleted &&
+            cycle.newerPlaybackIntentReason == null
     }
 
     fun newerPlaybackIntentReason(cycleId: Long): String? =
@@ -387,6 +422,11 @@ internal object PlaybackRestoreWatchdogPolicy {
     private const val MILLIS_PER_CHARACTER = 90L
     private const val COMPLETION_MARGIN_MS = 5_000L
 
+    /**
+     * Bounds the request-to-start phase only. After Android reports
+     * [UtteranceProgressListener.onStart], completion is governed by the real
+     * TTS lifecycle callback instead of this estimate.
+     */
     fun timeoutMs(textLength: Int, speechRate: Float): Long {
         val safeRate = speechRate.coerceIn(0.5f, 2f)
         val estimatedSpeechMs = (textLength.coerceAtLeast(1) * MILLIS_PER_CHARACTER / safeRate).toLong()

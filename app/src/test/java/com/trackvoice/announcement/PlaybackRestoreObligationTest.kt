@@ -215,6 +215,7 @@ class PlaybackRestoreObligationTest {
         val obligation = armed()
         val lease = obligation.activeLease()!!
         assertTrue(obligation.bindSpeech(lease.id, generation = 7L))
+        assertSame(lease, obligation.markTtsStarted(lease.id, generation = 7L))
         assertNull(validity(obligation, lease.id))
         assertEquals(
             PlaybackRestorePlayerObservation.OWNED_PAUSE_CONFIRMED,
@@ -238,6 +239,95 @@ class PlaybackRestoreObligationTest {
                 speechGeneration = 7L,
             ),
         )
+        assertNull(obligation.claimRestoreIfReady(lease.id))
+    }
+
+    @Test
+    fun actualTtsStartDisarmsSpeechWatchdogAndRestoresExactlyOnceAfterLongSpeech() {
+        val obligation = armed()
+        val lease = obligation.activeLease()!!
+        val generation = 7L
+        val oldDurationEstimate = PlaybackRestoreWatchdogPolicy.timeoutMs(textLength = 46, speechRate = 1f)
+
+        assertEquals(9_140L, oldDurationEstimate)
+        assertTrue(obligation.bindSpeech(lease.id, generation))
+        assertEquals(
+            PlaybackRestorePlayerObservation.OWNED_PAUSE_CONFIRMED,
+            obligation.observePauseCallback(lease.id, 200L, 180L),
+        )
+        assertTrue(obligation.shouldExpireUnstartedSpeechWatchdog(lease.id, generation))
+
+        // Even after the old character-count deadline, an observed Android
+        // onStart keeps the valid owned lease until its real terminal callback.
+        assertSame(lease, obligation.markTtsStarted(lease.id, generation))
+        assertTrue(lease.ttsStarted)
+        assertTrue(!obligation.shouldExpireUnstartedSpeechWatchdog(lease.id, generation))
+
+        assertSame(
+            lease,
+            obligation.markTtsCompleted(
+                lease.id,
+                PlaybackRestoreTrigger.TTS_COMPLETED,
+                speechGeneration = generation,
+            ),
+        )
+        assertSame(lease, obligation.claimRestoreIfReady(lease.id))
+        assertNull(obligation.claimRestoreIfReady(lease.id))
+    }
+
+    @Test
+    fun unstartedSpeechWatchdogStillDiscardsAbandonedLeaseWithoutRestore() {
+        val obligation = armed()
+        val lease = obligation.activeLease()!!
+        val generation = 7L
+        assertTrue(obligation.bindSpeech(lease.id, generation))
+
+        assertTrue(obligation.shouldExpireUnstartedSpeechWatchdog(lease.id, generation))
+        assertSame(lease, obligation.cancel(lease.id))
+        assertNull(obligation.activeLease())
+        assertNull(
+            obligation.markTtsCompleted(
+                lease.id,
+                PlaybackRestoreTrigger.TTS_COMPLETED,
+                speechGeneration = generation,
+            ),
+        )
+        assertNull(obligation.claimRestoreIfReady(lease.id))
+    }
+
+    @Test
+    fun explicitCancellationDuringStartedTtsDropsTerminalRestore() {
+        val obligation = armed()
+        val lease = obligation.activeLease()!!
+        val generation = 7L
+        assertTrue(obligation.bindSpeech(lease.id, generation))
+        assertSame(lease, obligation.markTtsStarted(lease.id, generation))
+        obligation.observePauseCallback(lease.id, 200L, 180L)
+
+        // The controller uses this same cancellation boundary for observable
+        // user intent, STOP, track/session replacement, and listener teardown.
+        assertSame(lease, obligation.cancel(lease.id))
+        assertNull(
+            obligation.markTtsCompleted(
+                lease.id,
+                PlaybackRestoreTrigger.TTS_COMPLETED,
+                speechGeneration = generation,
+            ),
+        )
+        assertNull(obligation.claimRestoreIfReady(lease.id))
+    }
+
+    @Test
+    fun staleTtsStartAfterLeaseCancelledCannotRearmRestore() {
+        val obligation = armed()
+        val lease = obligation.activeLease()!!
+        val generation = 7L
+        assertTrue(obligation.bindSpeech(lease.id, generation))
+        assertSame(lease, obligation.markTtsStarted(lease.id, generation))
+        assertSame(lease, obligation.cancel(lease.id))
+        assertNull(obligation.activeLease())
+        assertNull(obligation.markTtsStarted(lease.id, generation))
+        assertNull(obligation.markTtsCompleted(lease.id, PlaybackRestoreTrigger.TTS_COMPLETED, generation))
         assertNull(obligation.claimRestoreIfReady(lease.id))
     }
 
@@ -302,6 +392,8 @@ class PlaybackRestoreObligationTest {
     fun userStopAfterTrackTalkPauseInvalidatesRestore() {
         val obligation = armed()
         val lease = obligation.activeLease()!!
+        assertTrue(obligation.bindSpeech(lease.id, generation = 7L))
+        assertSame(lease, obligation.markTtsStarted(lease.id, generation = 7L))
         assertEquals(
             PlaybackRestorePlayerObservation.NEWER_PAUSE_OR_STOP_INTENT,
             obligation.observePlayerState(
@@ -408,6 +500,8 @@ class PlaybackRestoreObligationTest {
     fun externalPlaybackDuringTtsPreventsRedundantTrackTalkPlay() {
         val obligation = armed()
         val lease = obligation.activeLease()!!
+        assertTrue(obligation.bindSpeech(lease.id, generation = 7L))
+        assertSame(lease, obligation.markTtsStarted(lease.id, generation = 7L))
         obligation.observePauseCallback(lease.id, 200L, 180L)
         assertEquals(
             PlaybackRestorePlayerObservation.INTERVENING_PLAYBACK,
@@ -420,9 +514,19 @@ class PlaybackRestoreObligationTest {
     fun sessionDestroyedOrRemovedInvalidatesLeaseContext() {
         val obligation = armed()
         val lease = obligation.activeLease()!!
+        assertTrue(obligation.bindSpeech(lease.id, generation = 7L))
+        assertSame(lease, obligation.markTtsStarted(lease.id, generation = 7L))
         assertEquals(
             "SESSION_IDENTITY_CHANGED",
             validity(obligation, lease.id, sessionKey = null, controllerGeneration = null),
+        )
+        assertSame(lease, obligation.cancel(lease.id))
+        assertNull(
+            obligation.markTtsCompleted(
+                lease.id,
+                PlaybackRestoreTrigger.TTS_COMPLETED,
+                speechGeneration = 7L,
+            ),
         )
     }
 
@@ -430,9 +534,19 @@ class PlaybackRestoreObligationTest {
     fun controllerReplacementInvalidatesLeaseContext() {
         val obligation = armed()
         val lease = obligation.activeLease()!!
+        assertTrue(obligation.bindSpeech(lease.id, generation = 7L))
+        assertSame(lease, obligation.markTtsStarted(lease.id, generation = 7L))
         assertEquals(
             "CONTROLLER_GENERATION_CHANGED",
             validity(obligation, lease.id, controllerGeneration = 12L),
+        )
+        assertSame(lease, obligation.cancel(lease.id))
+        assertNull(
+            obligation.markTtsCompleted(
+                lease.id,
+                PlaybackRestoreTrigger.TTS_COMPLETED,
+                speechGeneration = 7L,
+            ),
         )
     }
 
@@ -450,6 +564,8 @@ class PlaybackRestoreObligationTest {
     fun logicalSessionOrTrackReplacementInvalidatesLeaseContext() {
         val obligation = armed()
         val lease = obligation.activeLease()!!
+        assertTrue(obligation.bindSpeech(lease.id, generation = 7L))
+        assertSame(lease, obligation.markTtsStarted(lease.id, generation = 7L))
         assertEquals(
             "SESSION_GENERATION_CHANGED",
             validity(obligation, lease.id, sessionGeneration = 4L),
@@ -457,6 +573,14 @@ class PlaybackRestoreObligationTest {
         assertEquals(
             "TRACK_IDENTITY_CHANGED",
             validity(obligation, lease.id, event = track().copy(mediaId = "b", title = "Song B")),
+        )
+        assertSame(lease, obligation.cancel(lease.id))
+        assertNull(
+            obligation.markTtsCompleted(
+                lease.id,
+                PlaybackRestoreTrigger.TTS_COMPLETED,
+                speechGeneration = 7L,
+            ),
         )
     }
 
@@ -525,6 +649,7 @@ class PlaybackRestoreObligationTest {
         val obligation = armed()
         val lease = obligation.activeLease()!!
         obligation.bindSpeech(lease.id, generation = 9L)
+        assertSame(lease, obligation.markTtsStarted(lease.id, generation = 9L))
         assertSame(lease, obligation.cancel(lease.id))
 
         assertNull(

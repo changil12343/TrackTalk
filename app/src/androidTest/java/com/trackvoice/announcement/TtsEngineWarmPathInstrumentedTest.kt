@@ -14,6 +14,7 @@ import com.trackvoice.data.GenderFilter
 import com.trackvoice.data.MusicTreatment
 import com.trackvoice.data.UserSettings
 import com.trackvoice.data.VoiceLanguage
+import java.util.Collections
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -133,6 +134,44 @@ class TtsEngineWarmPathInstrumentedTest {
 
         provider.completeNext()
         assertTrue(finished.await(3L, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun actualUtteranceStartIsReportedOnceBeforeTerminalCompletion() {
+        val provider = FakeTtsProvider(
+            catalogs = listOf(listOf(voice("english", "en-US"))),
+            autoComplete = false,
+        )
+        val tts = createEngine(provider)
+        val started = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        val callbacks = Collections.synchronizedList(mutableListOf<String>())
+        val terminal = AtomicReference<Pair<Boolean, com.trackvoice.diagnostics.DiagnosticMessage>>()
+
+        instrumentation.runOnMainSync {
+            tts.speak(
+                text = "Long running speech.",
+                settings = englishSettings(),
+                onStarted = {
+                    callbacks += "started"
+                    started.countDown()
+                },
+            ) { success, message ->
+                terminal.set(success to message)
+                callbacks += "finished"
+                finished.countDown()
+            }
+        }
+        instrumentation.waitForIdleSync()
+
+        provider.startNext()
+        assertTrue(started.await(3L, TimeUnit.SECONDS))
+        assertEquals(listOf("started"), callbacks.toList())
+
+        provider.completeStartedNext()
+        assertTrue(finished.await(3L, TimeUnit.SECONDS))
+        assertTrue(requireNotNull(terminal.get()).first)
+        assertEquals(listOf("started", "finished"), callbacks.toList())
     }
 
     @Test
@@ -336,6 +375,7 @@ class TtsEngineWarmPathInstrumentedTest {
         private var listener: UtteranceProgressListener? = null
         private var activeVoiceName: String? = null
         private val pendingUtteranceIds = ArrayDeque<String>()
+        private val startedUtteranceIds = ArrayDeque<String>()
 
         var availableVoiceCalls: Int = 0
             private set
@@ -395,8 +435,18 @@ class TtsEngineWarmPathInstrumentedTest {
         }
 
         fun completeNext() {
+            startNext()
+            completeStartedNext()
+        }
+
+        fun startNext() {
             val utteranceId = pendingUtteranceIds.removeFirst()
+            startedUtteranceIds.addLast(utteranceId)
             listener?.onStart(utteranceId)
+        }
+
+        fun completeStartedNext() {
+            val utteranceId = startedUtteranceIds.removeFirst()
             listener?.onDone(utteranceId)
         }
         override fun stop() = Unit

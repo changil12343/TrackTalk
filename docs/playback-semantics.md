@@ -138,8 +138,12 @@ pause command was actually issued by TrackTalk. The lease is never persisted;
 process recreation begins with no playback authority even when duplicate
 history and settings are restored.
 
-The lease independently records `ttsCompleted` and `pauseAcknowledged`.
-A matching current TTS completion/error/interruption (or an immediate
+The lease independently records `ttsStarted`, `ttsCompleted`, and
+`pauseAcknowledged`. Before Android reports `TTS_STARTED`, a bounded
+request-to-start watchdog can discard an abandoned lease without `PLAY`.
+After a matching real `TTS_STARTED`, the duration estimate is disarmed and
+the terminal TTS lifecycle governs that owned lease. A matching current TTS
+completion/error/interruption (or an immediate
 audio-focus failure in that same transaction) marks only the first condition;
 an attributable post-command `PLAYBACK_STATE` callback carrying `PAUSED` marks
 only the second. Metadata/queue callbacks that merely remap a PAUSED controller
@@ -217,9 +221,12 @@ The playback quick-settings/UI toggle is a separate explicit user command. Its
 user-requested `PLAY` path first cancels any automatic lease and is never used
 by listener reconnect, process recovery, TTS cleanup, or announcement timers.
 
-The controller also arms a bounded speech-completion watchdog. If Android TTS
-never returns a completion callback, it releases focus and invalidates the
-lease without sending `PLAY`. A late timer is cleanup, never playback authority.
+The controller also arms a bounded request-to-start watchdog. If Android TTS
+never starts, it releases focus and invalidates the lease without sending
+`PLAY`. Once Android reports a matching `TTS_STARTED`, that estimate is
+cancelled and a queued timer is guarded from invalidating the active lease;
+the real terminal callback remains authoritative. A late timer is cleanup,
+never playback authority.
 If TTS is complete but an attributable pause acknowledgement never arrives, a
 separate safety expiry discards the pending lease and likewise sends no
 `PLAY`; it is not the normal synchronization mechanism.
