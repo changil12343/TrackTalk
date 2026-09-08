@@ -2264,7 +2264,7 @@ internal fun contentReadFieldItemKey(
 ): String = "${if (active) "active" else "inactive"}:${field.name}"
 
 @Composable
-private fun SettingSwitchRow(title: String, summary: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+private fun SettingSwitchRow(title: String, summary: String?, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -2272,7 +2272,9 @@ private fun SettingSwitchRow(title: String, summary: String, checked: Boolean, o
     ) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
             Text(title)
-            Text(summary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            summary?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }

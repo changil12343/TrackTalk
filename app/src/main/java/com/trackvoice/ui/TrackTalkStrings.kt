@@ -220,15 +220,17 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
         "Bluetooth·USB·HDMI 기기별 동작과 화면 꺼짐 자동 활성화를 설정할 수 있습니다.",
         "Configure Bluetooth, USB, and HDMI behavior plus screen-off auto-enable.",
     )
-    val deviceAutomationSummary: String get() = t("기기별 안내와 자동 켜짐을 설정합니다.", "Set announcements and auto-enable for each device.")
+    val deviceAutomationSummary: String get() = t("기기별 안내와 자동 켜짐을 설정합니다.", "Set announcements and automation per device.")
     val noConnectedDevices: String get() = t("연결된 이어폰이나 Bluetooth 기기가 없습니다.", "No headphones or Bluetooth devices are connected.")
     val diagnosticsSummary: String get() = t("알림 접근, 미디어 감지, 음성 엔진 상태를 확인합니다.", "Check notification access, media detection, and the voice engine.")
     val openDiagnostics: String get() = t("진단 열기", "Open diagnostics")
     val backToDevices: String get() = t("기기·진단으로 돌아가기", "Back to devices & diagnostics")
     val useOnThisDevice: String get() = t("이 기기에서 사용", "Use on this device")
-    val useOnThisDeviceSummary: String get() = t("이 기기에서 안내합니다.", "Announce on this device.")
+    // The English title is self-explanatory. Keep Korean supporting copy, but
+    // omit English text rather than reserving an empty supporting-text line.
+    val useOnThisDeviceSummary: String? get() = if (english) null else "이 기기에서 안내합니다."
     val autoEnableOnConnect: String get() = t("연결 시 자동 켜기", "Auto-enable on connect")
-    val autoEnableOnConnectSummary: String get() = t("연결되면 안내를 켭니다.", "Enable announcements when it connects.")
+    val autoEnableOnConnectSummary: String get() = t("연결되면 안내를 켭니다.", "Turn on when connected.")
     val trackGuide: String get() = t("기본 안내", "Basic announcements")
     val guideDefaultsSummary: String get() = t("현재 안내 설정", "Current settings")
     val trackStart: String get() = t("재생 시작", "When playback starts")
@@ -302,12 +304,12 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
     )
     val detailedGuidePlusTitle: String get() = t("상세 안내 설정", "Detailed guide settings")
     val screenAutomation: String get() = t("화면 자동화", "Screen automation")
-    val screenOffEnable: String get() = t("화면 끄면 자동 켜기", "Auto-enable when screen turns off")
-    val screenOffEnableSummary: String get() = t("화면이 꺼지면 안내를 켭니다.", "Enable announcements when the screen turns off.")
+    val screenOffEnable: String get() = t("화면 끄면 자동 켜기", "Enable on screen off")
+    val screenOffEnableSummary: String get() = t("화면이 꺼지면 안내를 켭니다.", "Turn on when the screen turns off.")
     val screenOnRestore: String get() = t("화면 켜면 원래대로", "Restore on wake")
-    val screenOnRestoreSummary: String get() = t("자동으로 켜진 안내를 해제합니다.", "Turn off automatically enabled announcements.")
-    val bluetoothOnly: String get() = t("화면 끄면 Bluetooth에서만 켜기", "Screen-off auto-enable with Bluetooth")
-    val bluetoothOnlySummary: String get() = t("Bluetooth가 연결된 경우에만 안내를 켭니다.", "Enable announcements only when Bluetooth is connected.")
+    val screenOnRestoreSummary: String get() = t("자동으로 켜진 안내를 해제합니다.", "Restore the previous state.")
+    val bluetoothOnly: String get() = t("화면 끄면 Bluetooth에서만 켜기", "Require Bluetooth")
+    val bluetoothOnlySummary: String get() = t("Bluetooth가 연결된 경우에만 안내를 켭니다.", "Only auto-enable with Bluetooth audio.")
 
     val appsIntro: String get() = t(
         "앱별로 TrackTalk 사용 여부만 선택합니다.",

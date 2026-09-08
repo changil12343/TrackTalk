@@ -4,8 +4,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Dp
@@ -70,23 +72,45 @@ class DeviceAutomationCopyInstrumentedTest {
             }
         }
 
-        listOf(
-            strings.deviceAutomationSummary,
-            strings.useOnThisDevice,
-            strings.useOnThisDeviceSummary,
-            strings.autoEnableOnConnect,
-            strings.autoEnableOnConnectSummary,
-            strings.screenAutomation,
-            strings.screenOffEnable,
-            strings.screenOffEnableSummary,
-            strings.screenOnRestore,
-            strings.screenOnRestoreSummary,
-            strings.bluetoothOnly,
-            strings.bluetoothOnlySummary,
-        ).forEach { text ->
+        expectedCopy(language).forEach { text ->
             composeRule.onNodeWithText(text)
                 .performScrollTo()
                 .assertIsDisplayed()
         }
+
+        if (language == AppLanguage.ENGLISH) {
+            composeRule.onAllNodesWithText("Announce on this device.").assertCountEquals(0)
+        }
+    }
+
+    private fun expectedCopy(language: AppLanguage): List<String> = when (language) {
+        AppLanguage.KOREAN -> listOf(
+            "기기별 안내와 자동 켜짐을 설정합니다.",
+            "이 기기에서 사용",
+            "이 기기에서 안내합니다.",
+            "연결 시 자동 켜기",
+            "연결되면 안내를 켭니다.",
+            "화면 자동화",
+            "화면 끄면 자동 켜기",
+            "화면이 꺼지면 안내를 켭니다.",
+            "화면 켜면 원래대로",
+            "자동으로 켜진 안내를 해제합니다.",
+            "화면 끄면 Bluetooth에서만 켜기",
+            "Bluetooth가 연결된 경우에만 안내를 켭니다.",
+        )
+        AppLanguage.ENGLISH -> listOf(
+            "Set announcements and automation per device.",
+            "Use on this device",
+            "Auto-enable on connect",
+            "Turn on when connected.",
+            "Screen automation",
+            "Enable on screen off",
+            "Turn on when the screen turns off.",
+            "Restore on wake",
+            "Restore the previous state.",
+            "Require Bluetooth",
+            "Only auto-enable with Bluetooth audio.",
+        )
+        AppLanguage.SYSTEM -> error("The copy test chooses an explicit UI language.")
     }
 }
