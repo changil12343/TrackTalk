@@ -40,8 +40,11 @@ or catalogue the user's music.
   `TITLE → ARTIST → ALBUM`.
 - Track number remains hidden from the beta UI. Never derive it from queue
   index or songs heard in the session.
-- Fresh persisted TTS volume is 80%; migration preserves an existing stored
-  value, while Free runtime entitlement clamps the Plus-only control to 80%.
+- Fresh announcement volume mode is `FOLLOW_MEDIA`, which passes neutral TTS
+  gain (`1.0f`) and leaves normal Android route/stream control intact. Custom
+  mode starts its slider at 80%; migration preserves every existing stored
+  volume as Custom because its original intent cannot be known, while Free
+  runtime entitlement clamps the Plus-only custom control to 80%.
 - One logical playback occurrence receives at most one automatic announcement.
   A genuine `A → B → A` sequence can announce A again.
 - Only TrackTalk-owned pauses may be restored, and a user/manual pause must

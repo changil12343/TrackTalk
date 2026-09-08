@@ -43,9 +43,13 @@ The normal duck path never mutates `STREAM_MUSIC`;
 `DeviceVolumeManager` is a separate explicit device-volume feature and must not
 be repurposed as ordinary ducking.
 
-Fresh defaults are TTS volume 80% and music attenuation 50%. A saved user TTS
-volume, including an older one, is never overwritten by migration because no
-safe code can distinguish an old default from an intentional preference.
+Fresh settings use **Follow media volume**: TrackTalk passes its internal TTS
+gain as `1.0f`, while Android applies the selected route and normal stream
+level. TrackTalk never reads a system-volume ratio or multiplies one into that
+gain. The custom-volume slider retains its 80% starting value only when a user
+chooses Custom. Older builds persisted only a volume value, so every existing
+value migrates to Custom without being changed; only storage with no legacy
+volume value starts in Follow media volume.
 
 ## TTS completion boundary
 
@@ -78,7 +82,8 @@ The engine:
   metadata only;
 - caches configured voice/language/rate/pitch to avoid redundant calls;
 - refreshes the catalog only after a failed selected voice;
-- maps UI volume directly to TTS gain without multiplying it by duck level;
+- maps Follow media volume to neutral TTS gain (`1.0f`) and Custom directly to
+  its saved TTS gain, without multiplying either by a stream or duck level;
 - finishes the controller cycle on success, error, or interruption.
 
 Android `Voice` has no standardized gender property. The UI only shows gender

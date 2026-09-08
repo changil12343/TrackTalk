@@ -86,7 +86,7 @@ class DataStoreRepositoryInstrumentedTest {
                     defaultReadFields = readFields,
                 )
             }
-            repository.migrateTtsVolumeDefault()
+            repository.migrateAnnouncementVolumeMode()
             repository.migrateContentReadDefaults()
             repository.migrateContentReadOrder()
             repository.migratePlaybackContextSettings()
@@ -102,6 +102,42 @@ class DataStoreRepositoryInstrumentedTest {
             assertEquals(AppLanguage.KOREAN, korean.appLanguage)
             assertEquals(VoiceLanguage.KOREAN, korean.voiceLanguage)
             assertEquals(readFields, korean.defaultReadFields)
+        } finally {
+            repository.updateUserSettings { original }
+        }
+    }
+
+    @Test
+    fun announcementVolumeModeAndCustomValueSurviveRepositoryRecreation() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val repository = DataStoreRepository(context)
+        val original = repository.currentUserSettings()
+
+        try {
+            repository.updateUserSettings {
+                it.copy(
+                    announcementVolumeMode = AnnouncementVolumeMode.CUSTOM,
+                    volume = 0.81f,
+                )
+            }
+
+            val custom = DataStoreRepository(context).currentUserSettings()
+            assertEquals(AnnouncementVolumeMode.CUSTOM, custom.announcementVolumeMode)
+            assertEquals(0.81f, custom.volume, 0f)
+
+            repository.updateUserSettings {
+                it.copy(announcementVolumeMode = AnnouncementVolumeMode.FOLLOW_MEDIA)
+            }
+            val follow = DataStoreRepository(context).currentUserSettings()
+            assertEquals(AnnouncementVolumeMode.FOLLOW_MEDIA, follow.announcementVolumeMode)
+            assertEquals(0.81f, follow.volume, 0f)
+
+            repository.updateUserSettings {
+                it.copy(announcementVolumeMode = AnnouncementVolumeMode.CUSTOM)
+            }
+            val restoredCustom = DataStoreRepository(context).currentUserSettings()
+            assertEquals(AnnouncementVolumeMode.CUSTOM, restoredCustom.announcementVolumeMode)
+            assertEquals(0.81f, restoredCustom.volume, 0f)
         } finally {
             repository.updateUserSettings { original }
         }

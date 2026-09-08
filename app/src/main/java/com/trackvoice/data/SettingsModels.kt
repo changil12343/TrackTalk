@@ -1,5 +1,6 @@
 package com.trackvoice.data
 
+// The initial slider value for Custom mode. Fresh settings use FOLLOW_MEDIA.
 const val DEFAULT_TTS_VOLUME_PERCENT = 80
 const val DEFAULT_TTS_VOLUME = 0.80f
 const val DEFAULT_MUSIC_DUCK_PERCENT = 50
@@ -7,15 +8,38 @@ const val MIN_MUSIC_DUCK_PERCENT = 10
 const val MAX_MUSIC_DUCK_PERCENT = 80
 const val YOUTUBE_PACKAGE_NAME = "com.google.android.youtube"
 
-/**
- * The default is applied only when storage has no voice-volume value yet.
- * Once a value exists, including a value written by an older build, it is
- * treated as an explicit user preference and must not be replaced.
- */
-object TtsVolumeDefaultPolicy {
-    fun valueFor(storedVolume: Float?): Float = storedVolume ?: DEFAULT_TTS_VOLUME
+/** Controls whether TrackTalk uses neutral TTS gain or a saved custom gain. */
+enum class AnnouncementVolumeMode {
+    /** Let Android's normal route/stream volume control the final level. */
+    FOLLOW_MEDIA,
 
-    fun shouldWriteDefault(storedVolume: Float?): Boolean = storedVolume == null
+    /** Apply the user-selected relative TTS gain. */
+    CUSTOM,
+    ;
+
+    fun effectiveTtsGain(savedCustomVolume: Float): Float = when (this) {
+        FOLLOW_MEDIA -> 1f
+        CUSTOM -> savedCustomVolume.coerceIn(0f, 1f)
+    }
+
+    companion object {
+        fun fromStoredValue(value: String?): AnnouncementVolumeMode? =
+            values().firstOrNull { it.name == value }
+    }
+}
+
+/**
+ * Older builds persisted only a volume value, so its provenance cannot be
+ * recovered. Preserve every existing value as an explicit custom setting;
+ * only storage without a legacy value starts in [AnnouncementVolumeMode.FOLLOW_MEDIA].
+ */
+object AnnouncementVolumeMigrationPolicy {
+    fun modeFor(
+        storedMode: String?,
+        storedCustomVolume: Float?,
+    ): AnnouncementVolumeMode = AnnouncementVolumeMode.fromStoredValue(storedMode)
+        ?: if (storedCustomVolume == null) AnnouncementVolumeMode.FOLLOW_MEDIA
+        else AnnouncementVolumeMode.CUSTOM
 }
 
 fun defaultAppGuideEnabled(packageName: String, appName: String = ""): Boolean =
@@ -359,6 +383,7 @@ data class UserSettings(
     val genderFilter: GenderFilter = GenderFilter.ANY,
     val speechRate: Float = 1f,
     val pitch: Float = 1f,
+    val announcementVolumeMode: AnnouncementVolumeMode = AnnouncementVolumeMode.FOLLOW_MEDIA,
     val volume: Float = DEFAULT_TTS_VOLUME,
     val raiseDeviceVolume: Boolean = false,
     val deviceVolumePercent: Int = 90,

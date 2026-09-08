@@ -126,6 +126,7 @@ import com.trackvoice.data.AnnouncementOutputPolicy
 import com.trackvoice.data.AnnouncementReadField
 import com.trackvoice.data.AnnouncementTiming
 import com.trackvoice.data.AnnouncementTimingPolicy
+import com.trackvoice.data.AnnouncementVolumeMode
 import com.trackvoice.data.AppSettings
 import com.trackvoice.data.AppCategory
 import com.trackvoice.data.AppLanguage
@@ -138,7 +139,6 @@ import com.trackvoice.data.MusicTreatment
 import com.trackvoice.data.TrackStartBehavior
 import com.trackvoice.data.AudioDeviceSettings
 import com.trackvoice.data.BETA_VISIBLE_ANNOUNCEMENT_READ_FIELDS
-import com.trackvoice.data.DEFAULT_TTS_VOLUME_PERCENT
 import com.trackvoice.data.mergeBetaVisibleAnnouncementReadFields
 import com.trackvoice.data.normalizeAnnouncementReadFields
 import com.trackvoice.data.reorderAnnouncementReadField
@@ -1712,7 +1712,7 @@ private fun InstalledAppIcon(packageName: String) {
 }
 
 @Composable
-private fun VoiceSettingsScreen(
+internal fun VoiceSettingsScreen(
     settings: UserSettings,
     voices: List<InstalledVoice>,
     ttsStatus: com.trackvoice.announcement.TtsState,
@@ -1793,14 +1793,32 @@ private fun VoiceSettingsScreen(
                     SliderSetting(strings.pitch, settings.pitch, 0.5f..2f, { value -> "${"%.1f".format(Locale.getDefault(), value)}x" }) { value ->
                         onUpdate { current -> current.copy(pitch = value) }
                     }
-                    SliderSetting(strings.voiceVolumeSeparate, settings.volume, 0f..1f, { value -> "${(value * 100).toInt()}%" }) { value ->
-                        onUpdate { current -> current.copy(volume = value) }
+                    OptionDropdown(
+                        strings.voiceVolumeSeparate,
+                        settings.announcementVolumeMode,
+                        listOf(AnnouncementVolumeMode.FOLLOW_MEDIA, AnnouncementVolumeMode.CUSTOM),
+                        strings::announcementVolumeMode,
+                    ) { mode ->
+                        onUpdate { current -> current.copy(announcementVolumeMode = mode) }
                     }
-                    Text(
-                        strings.speechVolumeHint,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    when (settings.announcementVolumeMode) {
+                        AnnouncementVolumeMode.FOLLOW_MEDIA -> Text(
+                            strings.followMediaVolumeHint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+
+                        AnnouncementVolumeMode.CUSTOM -> {
+                            SliderSetting(
+                                strings.customAnnouncementVolume,
+                                settings.volume,
+                                0f..1f,
+                                { value -> "${(value * 100).toInt()}%" },
+                            ) { value ->
+                                onUpdate { current -> current.copy(volume = value) }
+                            }
+                        }
+                    }
                 } else {
                     NavigationEntryContent(
                         title = strings.voiceControlsPlusTitle,
@@ -2070,7 +2088,7 @@ private fun BasicPlaybackDefaults() {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(strings.freeGuideWithMusic)
         Text(strings.freeMusicDuckSummary)
-        Text(strings.defaultVoiceVolumeSummary(DEFAULT_TTS_VOLUME_PERCENT))
+        Text(strings.defaultFollowMediaVolume)
     }
 }
 

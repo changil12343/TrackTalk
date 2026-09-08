@@ -84,7 +84,8 @@ When changing playback behavior, retain or add coverage for:
   [platform observability limitation](playback-semantics.md#owned-pause-restore-lifecycle),
   retaining the existing valid owned-restore semantics;
 - immediate policy forcing delay/minimum playback to zero;
-- preserved explicit TTS volume and fresh 80% default;
+- Follow-media TTS gain (`1.0f`), saved custom-volume persistence, and legacy
+  volume migration to Custom without changing its value;
 - global beta-visible field ordering/toggle/drag behavior.
 
 ## Metadata tests

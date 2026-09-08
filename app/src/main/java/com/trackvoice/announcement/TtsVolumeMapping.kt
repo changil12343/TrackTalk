@@ -1,6 +1,9 @@
 package com.trackvoice.announcement
 
-/** Maps the user-facing voice slider directly to TextToSpeech's relative gain. */
+import com.trackvoice.data.UserSettings
+
+/** Maps TrackTalk's own announcement gain directly to TextToSpeech. */
 object TtsVolumeMapping {
-    fun parameterForUiVolume(volume: Float): Float = volume.coerceIn(0f, 1f)
+    fun parameterFor(settings: UserSettings): Float =
+        settings.announcementVolumeMode.effectiveTtsGain(settings.volume)
 }

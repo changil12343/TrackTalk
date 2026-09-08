@@ -61,7 +61,7 @@ global title/artist/album field selection and ordering, standard Android voice
 selection/preview, per-app enablement, and reliability behavior.
 
 Plus is a lifetime quality-of-life upgrade for deeper control: speech rate,
-pitch, voice volume, music attenuation, timing/minimum-playback controls,
+pitch, custom voice volume, music attenuation, timing/minimum-playback controls,
 same-song repeat control, device/state automation, and future advanced
 convenience features. Runtime entitlement must remain synchronized with what
 the UI permits.

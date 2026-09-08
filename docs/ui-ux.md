@@ -72,9 +72,11 @@ remain only for safe migration and must not reappear as a UI model or a runtime
 precedence layer.
 
 Immediate reading means effective delay and minimum-playback duration are zero;
-the inapplicable controls are hidden. Detailed timing, speed, pitch, voice
-volume, music attenuation, repeat behavior, and automation remain Plus
-controls where runtime entitlement applies.
+the inapplicable controls are hidden. Detailed timing, speed, pitch, custom
+voice volume, music attenuation, repeat behavior, and automation remain Plus
+controls where runtime entitlement applies. Announcement gain defaults to
+Follow media volume; the percentage slider is shown only after Custom is
+selected.
 
 The music-during-announcement control exposes Keep, Lower music (the default),
 and Pause then announce under the existing entitlement rules. A saved

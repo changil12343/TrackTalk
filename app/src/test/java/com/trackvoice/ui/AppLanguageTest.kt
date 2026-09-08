@@ -5,6 +5,7 @@ import com.trackvoice.data.APP_LANGUAGE_OPTIONS
 import com.trackvoice.data.AnnouncementOutputPolicy
 import com.trackvoice.data.AnnouncementTiming
 import com.trackvoice.data.AnnouncementReadField
+import com.trackvoice.data.AnnouncementVolumeMode
 import com.trackvoice.data.resolve
 import com.trackvoice.data.UserSettings
 import com.trackvoice.data.VoiceLanguage
@@ -79,14 +80,14 @@ class AppLanguageTest {
     }
 
     @Test
-    fun defaultVoiceVolumeSummaryUsesTheNewDefaultInBothLanguages() {
+    fun defaultVoiceVolumeSummaryUsesFollowMediaInBothLanguages() {
         assertEquals(
-            "음성 기본 음량 80%",
-            TrackTalkStrings.forLanguage(AppLanguage.KOREAN, "en").defaultVoiceVolumeSummary(),
+            "안내 음성: 음악 볼륨 따르기",
+            TrackTalkStrings.forLanguage(AppLanguage.KOREAN, "en").defaultFollowMediaVolume,
         )
         assertEquals(
-            "Default voice volume: 80%",
-            TrackTalkStrings.forLanguage(AppLanguage.ENGLISH, "ko").defaultVoiceVolumeSummary(),
+            "Announcement voice: follows media volume",
+            TrackTalkStrings.forLanguage(AppLanguage.ENGLISH, "ko").defaultFollowMediaVolume,
         )
     }
 
@@ -143,6 +144,7 @@ class AppLanguageTest {
             APP_LANGUAGE_OPTIONS,
         )
         assertEquals(VoiceLanguage.AUTO, settings.voiceLanguage)
+        assertEquals(AnnouncementVolumeMode.FOLLOW_MEDIA, settings.announcementVolumeMode)
         assertEquals(listOf(AnnouncementReadField.TITLE), settings.defaultReadFields)
         assertEquals("System default", TrackTalkStrings.forLanguage(AppLanguage.ENGLISH, "en").appLanguageOption(AppLanguage.SYSTEM))
         assertEquals("시스템 언어", TrackTalkStrings.forLanguage(AppLanguage.KOREAN, "ko").appLanguageOption(AppLanguage.SYSTEM))

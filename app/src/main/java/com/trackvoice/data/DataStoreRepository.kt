@@ -30,7 +30,6 @@ private val Context.trackVoiceDataStore: DataStore<Preferences> by preferencesDa
 private fun appKey(packageName: String, suffix: String): Preferences.Key<String> =
     stringPreferencesKey("app.$packageName.$suffix")
 
-private const val TTS_VOLUME_DEFAULT_VERSION = 4
 private const val CONTENT_READ_DEFAULT_VERSION = 2
 private const val CONTENT_READ_ORDER_VERSION = 2
 private const val AUDIO_OUTPUT_POLICY_VERSION = 1
@@ -132,19 +131,16 @@ class DataStoreRepository(private val context: Context) {
         }
     }
 
-    suspend fun migrateTtsVolumeDefault() {
+    suspend fun migrateAnnouncementVolumeMode() {
         dataStore.edit { preferences ->
-            if ((preferences[Keys.ttsVolumeDefaultVersion] ?: 0) >= TTS_VOLUME_DEFAULT_VERSION) {
-                return@edit
-            }
             val storedVolume = preferences[Keys.volume]
-            // Any existing value is user data. It may be an older default, but
-            // there is no safe way to distinguish that from an explicit
-            // choice, so only brand-new storage receives the new default.
-            if (TtsVolumeDefaultPolicy.shouldWriteDefault(storedVolume)) {
-                preferences[Keys.volume] = TtsVolumeDefaultPolicy.valueFor(storedVolume)
+            val mode = AnnouncementVolumeMigrationPolicy.modeFor(
+                storedMode = preferences[Keys.announcementVolumeMode],
+                storedCustomVolume = storedVolume,
+            )
+            if (preferences[Keys.announcementVolumeMode] != mode.name) {
+                preferences[Keys.announcementVolumeMode] = mode.name
             }
-            preferences[Keys.ttsVolumeDefaultVersion] = TTS_VOLUME_DEFAULT_VERSION
         }
     }
 
@@ -445,8 +441,8 @@ class DataStoreRepository(private val context: Context) {
         val genderFilter = stringPreferencesKey("gender_filter")
         val speechRate = floatPreferencesKey("speech_rate")
         val pitch = floatPreferencesKey("pitch")
+        val announcementVolumeMode = stringPreferencesKey("announcement_volume_mode")
         val volume = floatPreferencesKey("volume")
-        val ttsVolumeDefaultVersion = intPreferencesKey("tts_volume_default_version")
         val contentReadDefaultVersion = intPreferencesKey("content_read_default_version")
         val contentReadOrderVersion = intPreferencesKey("content_read_order_version")
         val playbackContextSettingsVersion = intPreferencesKey("playback_context_settings_version")
@@ -497,6 +493,11 @@ class DataStoreRepository(private val context: Context) {
         val algorithmMode = enumOrDefault(this[Keys.algorithmMode], AnnouncementMode.TITLE_AND_ARTIST)
         val announcementOrder = enumOrDefault(this[Keys.announcementOrder], AnnouncementOrder.DEFAULT)
         val timing = enumOrDefault(this[Keys.timing], AnnouncementTiming.IMMEDIATE).normalizedForSettings()
+        val storedVolume = this[Keys.volume]
+        val announcementVolumeMode = AnnouncementVolumeMigrationPolicy.modeFor(
+            storedMode = this[Keys.announcementVolumeMode],
+            storedCustomVolume = storedVolume,
+        )
         return UserSettings(
             appLanguage = enumOrDefault(this[Keys.appLanguage], AppLanguage.SYSTEM),
             enabled = this[Keys.enabled] ?: true,
@@ -565,7 +566,8 @@ class DataStoreRepository(private val context: Context) {
             genderFilter = enumOrDefault(this[Keys.genderFilter], GenderFilter.ANY),
             speechRate = (this[Keys.speechRate] ?: 1f).coerceIn(0.5f, 2f),
             pitch = (this[Keys.pitch] ?: 1f).coerceIn(0.5f, 2f),
-            volume = (this[Keys.volume] ?: DEFAULT_TTS_VOLUME).coerceIn(0f, 1f),
+            announcementVolumeMode = announcementVolumeMode,
+            volume = (storedVolume ?: DEFAULT_TTS_VOLUME).coerceIn(0f, 1f),
             raiseDeviceVolume = this[Keys.raiseDeviceVolume] ?: false,
             deviceVolumePercent = (this[Keys.deviceVolumePercent] ?: 90).coerceIn(10, 100),
         )
@@ -661,6 +663,7 @@ class DataStoreRepository(private val context: Context) {
         this[Keys.genderFilter] = settings.genderFilter.name
         this[Keys.speechRate] = settings.speechRate.coerceIn(0.5f, 2f)
         this[Keys.pitch] = settings.pitch.coerceIn(0.5f, 2f)
+        this[Keys.announcementVolumeMode] = settings.announcementVolumeMode.name
         this[Keys.volume] = settings.volume.coerceIn(0f, 1f)
         this[Keys.raiseDeviceVolume] = settings.raiseDeviceVolume
         this[Keys.deviceVolumePercent] = settings.deviceVolumePercent.coerceIn(10, 100)

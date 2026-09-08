@@ -5,6 +5,7 @@ import com.trackvoice.data.MusicTreatment
 import com.trackvoice.data.TrackStartBehavior
 import com.trackvoice.data.AnnouncementMode
 import com.trackvoice.data.AnnouncementOrder
+import com.trackvoice.data.AnnouncementVolumeMode
 import com.trackvoice.data.DEFAULT_TTS_VOLUME
 import com.trackvoice.data.DEFAULT_TTS_VOLUME_PERCENT
 import com.trackvoice.data.AnnouncementReadField
@@ -14,7 +15,7 @@ import org.junit.Test
 
 class PremiumEntitlementsTest {
     @Test
-    fun freeVoiceDefaultIsSetToComfortableLevel() {
+    fun customVolumeFallbackRemainsEightyPercent() {
         assertEquals(80, DEFAULT_TTS_VOLUME_PERCENT)
         assertEquals(0.80f, DEFAULT_TTS_VOLUME, 0f)
     }
@@ -35,6 +36,7 @@ class PremiumEntitlementsTest {
         assertEquals(1f, effective.speechRate)
         assertEquals(1f, effective.pitch)
         assertEquals(DEFAULT_TTS_VOLUME, effective.volume)
+        assertEquals(AnnouncementVolumeMode.FOLLOW_MEDIA, effective.announcementVolumeMode)
         assertEquals(MusicTreatment.DUCK, effective.musicTreatment)
         assertEquals(TrackStartBehavior.PLAY_IMMEDIATELY, effective.trackStartBehavior)
         assertEquals(AnnouncementMode.TITLE_AND_ARTIST, effective.algorithmMode)
@@ -60,6 +62,17 @@ class PremiumEntitlementsTest {
         )
 
         assertEquals(settings, settings.forPremiumEntitlement(isPremium = true))
+    }
+
+    @Test
+    fun freeEntitlementDoesNotOverwriteSavedVolumeMode() {
+        val effective = UserSettings(
+            announcementVolumeMode = AnnouncementVolumeMode.CUSTOM,
+            volume = 0.81f,
+        ).forPremiumEntitlement(isPremium = false)
+
+        assertEquals(AnnouncementVolumeMode.CUSTOM, effective.announcementVolumeMode)
+        assertEquals(DEFAULT_TTS_VOLUME, effective.volume)
     }
 
 }

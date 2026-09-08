@@ -319,7 +319,7 @@ class TrackVoiceController(
                 announcementHistoryReady.complete(Unit)
             }
         }
-        scope.launch(Dispatchers.IO) { repository.migrateTtsVolumeDefault() }
+        scope.launch(Dispatchers.IO) { repository.migrateAnnouncementVolumeMode() }
         scope.launch(Dispatchers.IO) {
             repository.migrateContentReadDefaults()
             repository.migrateContentReadOrder()

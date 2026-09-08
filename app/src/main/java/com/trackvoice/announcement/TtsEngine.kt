@@ -319,7 +319,7 @@ class TtsEngine internal constructor(
             val supportedLocales = catalogSnapshot.supportedLocales
             configureSpeechRate(settings.speechRate.coerceIn(0.5f, 2f))
             configurePitch(settings.pitch.coerceIn(0.5f, 2f))
-            val ttsParamVolume = TtsVolumeMapping.parameterForUiVolume(settings.volume)
+            val ttsParamVolume = TtsVolumeMapping.parameterFor(settings)
             val params = Bundle().apply {
                 putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, ttsParamVolume)
             }
@@ -526,7 +526,8 @@ class TtsEngine internal constructor(
         }
         TrackTalkDebugLog.event(
             "AUDIO_GAIN_STATE",
-            "voiceUiPercent" to (settings.volume * 100f).toInt(),
+            "announcementVolumeMode" to settings.announcementVolumeMode,
+            "customVoicePercent" to (settings.volume * 100f).toInt(),
             "ttsParamVolume" to ttsParamVolume,
             "ttsUsage" to TrackTalkAudioAttributes.USAGE_LABEL,
             "ttsContentType" to TrackTalkAudioAttributes.CONTENT_TYPE_LABEL,
@@ -555,7 +556,8 @@ class TtsEngine internal constructor(
         )
         TrackTalkDebugLog.event(
             "VOICE_GAIN_DIAGNOSTIC",
-            "uiVoicePercent" to (settings.volume * 100f).toInt(),
+            "announcementVolumeMode" to settings.announcementVolumeMode,
+            "customVoicePercent" to (settings.volume * 100f).toInt(),
             "effectiveVoicePercent" to (ttsParamVolume * 100f).toInt(),
             "ttsParamVolume" to ttsParamVolume,
             "musicTreatment" to plan.musicTreatment,

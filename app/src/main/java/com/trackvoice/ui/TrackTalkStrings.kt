@@ -5,13 +5,13 @@ import com.trackvoice.data.AnnouncementOutputPolicy
 import com.trackvoice.data.AnnouncementReadField
 import com.trackvoice.data.AnnouncementTiming
 import com.trackvoice.data.AnnouncementTimingPolicy
+import com.trackvoice.data.AnnouncementVolumeMode
 import com.trackvoice.data.AppCategory
 import com.trackvoice.data.AppLanguage
 import com.trackvoice.data.GenderFilter
 import com.trackvoice.data.MusicTreatment
 import com.trackvoice.data.TrackStartBehavior
 import com.trackvoice.data.VoiceLanguage
-import com.trackvoice.data.DEFAULT_TTS_VOLUME_PERCENT
 import com.trackvoice.data.resolve
 import com.trackvoice.announcement.AudioDeviceKind
 import com.trackvoice.announcement.EffectiveAnnouncementConfiguration
@@ -256,11 +256,10 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
         "Music during announcements: reduce automatically",
     )
     val freeGuideWithMusic: String get() = t("새 곡: 음악과 함께 안내", "New tracks: announce over music")
-    fun defaultVoiceVolumeSummary(percent: Int = DEFAULT_TTS_VOLUME_PERCENT): String = t(
-        "음성 기본 음량 ${percent}%",
-        "Default voice volume: ${percent}%",
+    val defaultFollowMediaVolume: String get() = t(
+        "안내 음성: 음악 볼륨 따르기",
+        "Announcement voice: follows media volume",
     )
-    val separateVoiceVolumeSummary: String get() = t("음성 음량은 음악과 따로 조절합니다.", "Voice volume is separate from music.")
     val freeGuideDetailsSummary: String get() = t(
         "안내 시점과 음량을 세밀하게 조절합니다.",
         "Fine-tune announcement timing and volume.",
@@ -377,14 +376,19 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
     val speechRate: String get() = t("속도", "Speed")
     val pitch: String get() = t("높이", "Pitch")
     val voiceVolumeSeparate: String get() = t("안내 음성 음량", "Announcement volume")
-    val speechVolumeHint: String get() = t(
-        "안내 음성 음량은 음악과 별도로 적용됩니다. 음악 줄이기 정도는 기기와 음악 앱에 따라 달라질 수 있습니다.",
-        "Speech volume is independent of music. The amount of music lowering can vary by device and music app.",
+    fun announcementVolumeMode(mode: AnnouncementVolumeMode): String = when (mode) {
+        AnnouncementVolumeMode.FOLLOW_MEDIA -> t("음악 볼륨 따르기", "Follow media volume")
+        AnnouncementVolumeMode.CUSTOM -> t("직접 설정", "Custom")
+    }
+    val followMediaVolumeHint: String get() = t(
+        "휴대폰의 미디어 볼륨을 따릅니다.",
+        "Uses the current media volume.",
     )
+    val customAnnouncementVolume: String get() = t("직접 설정 음량", "Custom volume")
     val testPlayback: String get() = t("테스트 재생", "Test voice")
     val testExample: String get() = t("예: Glass Eyes · Radiohead", "Example: Glass Eyes · Radiohead")
     val voiceControlsPlusTitle: String get() = t("음성 세밀 조절은 Plus 기능입니다.", "Detailed voice controls are a Plus feature.")
-    val voiceControlsFreeSummary: String get() = t("말하기 속도·높이·음량을 음악과 분리해 직접 조절할 수 있습니다.", "Adjust speech speed, pitch, and volume separately from music.")
+    val voiceControlsFreeSummary: String get() = t("말하기 속도·높이와 직접 설정 음량을 조절할 수 있습니다.", "Adjust speech speed, pitch, and a custom announcement volume.")
 
     val connectionStatus: String get() = t("연결 상태", "Connection status")
     val notificationAccess: String get() = t("알림 접근", "Notification access")

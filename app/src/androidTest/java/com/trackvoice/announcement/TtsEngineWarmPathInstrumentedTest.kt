@@ -9,7 +9,9 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.trackvoice.data.AnnouncementVolumeMode
 import com.trackvoice.data.GenderFilter
+import com.trackvoice.data.MusicTreatment
 import com.trackvoice.data.UserSettings
 import com.trackvoice.data.VoiceLanguage
 import java.util.Locale
@@ -207,6 +209,43 @@ class TtsEngineWarmPathInstrumentedTest {
         assertEquals(listOf(true), provider.speakWasOnMain)
     }
 
+    @Test
+    fun followMediaPassesNeutralGainToTtsForEveryMusicTreatment() {
+        val provider = FakeTtsProvider(listOf(listOf(voice("english", "en-US"))))
+        val tts = createEngine(provider)
+
+        MusicTreatment.values().forEach { treatment ->
+            speakAndAwait(
+                tts = tts,
+                text = "Follow media $treatment.",
+                settings = englishSettings().copy(
+                    musicTreatment = treatment,
+                    announcementVolumeMode = AnnouncementVolumeMode.FOLLOW_MEDIA,
+                    volume = 0.25f,
+                ),
+            )
+        }
+
+        assertEquals(listOf(1f, 1f, 1f), provider.spokenVolumes)
+    }
+
+    @Test
+    fun customModePassesStoredGainToTts() {
+        val provider = FakeTtsProvider(listOf(listOf(voice("english", "en-US"))))
+        val tts = createEngine(provider)
+
+        speakAndAwait(
+            tts = tts,
+            text = "Custom gain.",
+            settings = englishSettings().copy(
+                announcementVolumeMode = AnnouncementVolumeMode.CUSTOM,
+                volume = 0.81f,
+            ),
+        )
+
+        assertEquals(listOf(0.81f), provider.spokenVolumes)
+    }
+
     private fun createEngine(provider: FakeTtsProvider): TtsEngine = TtsEngine(
         context = context,
         ttsProvider = provider,
@@ -306,6 +345,7 @@ class TtsEngineWarmPathInstrumentedTest {
             private set
         val setVoiceCalls = mutableListOf<String>()
         val spokenVoiceNames = mutableListOf<String?>()
+        val spokenVolumes = mutableListOf<Float>()
         val speakWasOnMain = mutableListOf<Boolean>()
 
         override val providerId: String = "fake"
@@ -343,6 +383,7 @@ class TtsEngineWarmPathInstrumentedTest {
         }
         override fun speak(text: String, queueMode: Int, params: Bundle, utteranceId: String): Int {
             spokenVoiceNames += activeVoiceName
+            spokenVolumes += params.getFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME)
             speakWasOnMain += Looper.myLooper() == Looper.getMainLooper()
             if (autoComplete) {
                 listener?.onStart(utteranceId)
