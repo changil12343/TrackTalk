@@ -465,6 +465,63 @@ class AnnounceThenPlayLatencyInstrumentedTest {
         assertEquals(PlaybackState.STATE_PLAYING, playerController.playbackState?.state)
     }
 
+    @Test
+    fun sameTrackReconcileAfterSuppressedBaselineDoesNotStartLatePauseTransaction() {
+        val playerController = MediaController(context, session.sessionToken)
+        val track = Track(
+            mediaId = "suppressed-reconcile-${SystemClock.elapsedRealtimeNanos()}",
+            title = "Suppressed reconciliation",
+        )
+
+        // Observe this occurrence while announcements are disabled, as happens
+        // when the output policy initially suppresses a speaker route. Becoming
+        // eligible later does not turn a same-track notification refresh into a
+        // new playback occurrence.
+        publishTrack(track, queueId = 9_999L)
+        waitUntil(timeoutMs = 3_000L) {
+            controller.mediaState.value.currentEvent?.mediaId == track.mediaId
+        }
+        val baselineAnnouncementAt = controller.diagnostics.value.lastAnnouncementAt
+
+        configureAndEnableAnnouncementMode(MusicTreatment.PAUSE)
+        val detectedAtBeforeReconcile = controller.mediaState.value.lastDetectedAt
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            controller.onMediaNotificationReconcileHint(context.packageName)
+        }
+        waitUntil(timeoutMs = 3_000L) {
+            controller.mediaState.value.lastDetectedAt != detectedAtBeforeReconcile
+        }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+
+        assertEquals(
+            "same-track reconciliation must not create an announcement",
+            baselineAnnouncementAt,
+            controller.diagnostics.value.lastAnnouncementAt,
+        )
+        assertEquals("same-track reconciliation must issue no PAUSE", 0, pauseCount.get())
+        assertEquals("same-track reconciliation must issue no PLAY", 0, playCount.get())
+        assertEquals(PlaybackState.STATE_PLAYING, playerController.playbackState?.state)
+
+        // A later true identity boundary must still use the unchanged PAUSE
+        // transaction: one owned pause, one restore, and a final PLAYING source.
+        publishTrack(1)
+        waitUntil(timeoutMs = 3_000L) {
+            controller.mediaState.value.currentEvent?.mediaId == TRACKS[1].mediaId
+        }
+        val announcementBeforeTransition = baselineAnnouncementAt ?: 0L
+        waitUntil(timeoutMs = 8_000L) {
+            val diagnostics = controller.diagnostics.value
+            diagnostics.lastAnnouncementAt?.let { it > announcementBeforeTransition } == true &&
+                diagnostics.lastAnnouncementSucceeded == true &&
+                pauseCount.get() == 1 &&
+                playCount.get() == 1 &&
+                playerController.playbackState?.state == PlaybackState.STATE_PLAYING
+        }
+        assertEquals("true transition must issue one PAUSE", 1, pauseCount.get())
+        assertEquals("true transition must restore once", 1, playCount.get())
+        assertEquals(PlaybackState.STATE_PLAYING, playerController.playbackState?.state)
+    }
+
     private fun configureAndEnableAnnouncementMode(musicTreatment: MusicTreatment) {
         runBlocking {
             app.repository.updateUserSettings { current ->
@@ -500,9 +557,20 @@ class AnnounceThenPlayLatencyInstrumentedTest {
     }
 
     private fun publishTrack(index: Int) {
-        val track = TRACKS[index]
-        publishMetadata(index)
-        setPlaybackState(PlaybackState.STATE_PLAYING, index.toLong())
+        publishTrack(TRACKS[index], index.toLong())
+    }
+
+    private fun publishTrack(track: Track, queueId: Long) {
+        session.setMetadata(
+            MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_MEDIA_ID, track.mediaId)
+                .putString(MediaMetadata.METADATA_KEY_TITLE, track.title)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, "TrackTalk")
+                .putString(MediaMetadata.METADATA_KEY_ALBUM, "Latency Album")
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, 180_000L)
+                .build(),
+        )
+        setPlaybackState(PlaybackState.STATE_PLAYING, queueId)
     }
 
     private fun publishMetadata(index: Int) {

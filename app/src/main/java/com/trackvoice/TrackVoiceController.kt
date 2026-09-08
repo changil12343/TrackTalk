@@ -1890,6 +1890,17 @@ class TrackVoiceController(
             logTransitionObservation(transitionObservation)
             return
         }
+        // A media notification is only a request to reconcile the authoritative
+        // MediaSession snapshot. If that snapshot confirms the same logical
+        // track, it must remain state-only: a delayed route refresh must not
+        // create a fresh occurrence or issue audio/transport work.
+        if (
+            update.eventType == MediaEventType.MEDIA_NOTIFICATION_RECONCILE &&
+            !actualTrackChange
+        ) {
+            logTransitionObservation(transitionObservation)
+            return
+        }
         scheduleAnnouncement(
             event = event,
             collection = collection,
