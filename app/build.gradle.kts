@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.net.URI
 import org.gradle.api.GradleException
 
 plugins {
@@ -64,15 +65,28 @@ val requireReleaseSigning = when (releaseSigningRequirement) {
     )
 }
 
-// The release operator supplies the public, non-geofenced policy URL. Empty
-// is intentionally visible in-app as an incomplete release configuration.
-val privacyPolicyUrl = providers
+val canonicalPrivacyPolicyUrl = "https://yiri20.github.io/Amnesiac/tracktalk-privacy.html"
+val privacyPolicyUrlOverride = providers
     .gradleProperty("tracktalk.privacyPolicyUrl")
     .orNull
     ?.trim()
-    .orEmpty()
-if (privacyPolicyUrl.isNotEmpty() && !privacyPolicyUrl.startsWith("https://")) {
-    throw GradleException("tracktalk.privacyPolicyUrl must use https://.")
+
+fun isValidHttpsUrl(value: String): Boolean = runCatching {
+    URI(value).let { uri ->
+        uri.scheme == "https" && !uri.host.isNullOrBlank()
+    }
+}.getOrDefault(false)
+
+val privacyPolicyUrl = when (privacyPolicyUrlOverride) {
+    null -> canonicalPrivacyPolicyUrl
+    else -> {
+        if (!isValidHttpsUrl(privacyPolicyUrlOverride)) {
+            throw GradleException(
+                "tracktalk.privacyPolicyUrl must be an absolute https URL with a host.",
+            )
+        }
+        privacyPolicyUrlOverride
+    }
 }
 val escapedPrivacyPolicyUrl = privacyPolicyUrl
     .replace("\\", "\\\\")

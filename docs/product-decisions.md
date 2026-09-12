@@ -99,9 +99,10 @@ production feedback action opens an `ACTION_SENDTO` `mailto:` intent with only
 app version/build, Android version, and device model prefilled. It never
 attaches logs, tracks, settings, or history.
 
-The App info card exposes the privacy policy when the release operator supplies
-the public HTTPS URL through `tracktalk.privacyPolicyUrl`. An empty value is a
-visible release-configuration state, never a fabricated policy link.
+The App info card links to the public TrackTalk Privacy Policy at
+`https://yiri20.github.io/Amnesiac/tracktalk-privacy.html`. A controlled build
+may explicitly override it with `tracktalk.privacyPolicyUrl`; an override must
+be an absolute HTTPS URL with a host or Gradle fails before producing a build.
 
 ## UI language versus speech language
 
