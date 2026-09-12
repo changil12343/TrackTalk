@@ -91,7 +91,7 @@ behavior.
 - Queue order can be a recommendation, shuffle, manually selected subset, or
   provider-generated “up next” list.
 - `queueIndex + 1` is not factual album position and is never spoken.
-- Omit a number unless player metadata/cache/external match proves it.
+- Omit a number unless player metadata or a stable queue-item cache proves it.
 
 ## Inferring playback source from song metadata
 

@@ -134,21 +134,18 @@ val GLOBAL_ANNOUNCEMENT_READ_FIELDS = listOf(
     AnnouncementReadField.TITLE,
     AnnouncementReadField.ARTIST,
     AnnouncementReadField.ALBUM,
-    AnnouncementReadField.TRACK_NUMBER,
 )
 
 /**
- * Fields exposed by the beta product surface. Track number remains in the
- * internal/persisted model for a future metadata-backed release, but is not
- * currently reliable enough to expose or speak by default.
+ * Fields exposed by the v1 product surface and used by automatic announcements.
+ * Track Number is retired from global settings so legacy state can never
+ * activate the former external metadata lookup.
  */
 val BETA_VISIBLE_ANNOUNCEMENT_READ_FIELDS = GLOBAL_ANNOUNCEMENT_READ_FIELDS
-    .filterNot { it == AnnouncementReadField.TRACK_NUMBER }
 
 /** The canonical default order for album announcements. */
 val DEFAULT_ALBUM_READ_FIELDS = listOf(
     AnnouncementReadField.ALBUM,
-    AnnouncementReadField.TRACK_NUMBER,
     AnnouncementReadField.TITLE,
     AnnouncementReadField.ARTIST,
 )
@@ -157,7 +154,6 @@ val DEFAULT_ALBUM_READ_FIELDS = listOf(
 val DEFAULT_PLAYLIST_READ_FIELDS = listOf(
     AnnouncementReadField.COLLECTION,
     AnnouncementReadField.ALBUM,
-    AnnouncementReadField.TRACK_NUMBER,
     AnnouncementReadField.TITLE,
     AnnouncementReadField.ARTIST,
 )
@@ -165,7 +161,6 @@ val DEFAULT_PLAYLIST_READ_FIELDS = listOf(
 /** The canonical default order for recommendation/shuffle announcements. */
 val DEFAULT_ALGORITHMIC_READ_FIELDS = listOf(
     AnnouncementReadField.ALBUM,
-    AnnouncementReadField.TRACK_NUMBER,
     AnnouncementReadField.TITLE,
     AnnouncementReadField.ARTIST,
 )
@@ -208,37 +203,18 @@ fun normalizeAnnouncementReadFields(
 }
 
 /**
- * Normalizes the beta-visible order without dropping hidden internal fields
- * from persisted settings. This lets the future track-number feature return
- * without treating a UI refresh as a destructive migration.
+ * Normalizes a v1-visible order. Retired hidden fields are deliberately
+ * dropped so a UI update cannot preserve the legacy external lookup path.
  */
 fun mergeBetaVisibleAnnouncementReadFields(
     storedFields: List<AnnouncementReadField>,
     visibleFields: Iterable<AnnouncementReadField>,
 ): List<AnnouncementReadField> {
-    val visible = normalizeAnnouncementReadFields(
+    return normalizeAnnouncementReadFields(
         fields = visibleFields,
         allowedFields = BETA_VISIBLE_ANNOUNCEMENT_READ_FIELDS,
         fallbackFields = DEFAULT_GLOBAL_ENABLED_READ_FIELDS,
     )
-    val hidden = storedFields
-        .filter { it in GLOBAL_ANNOUNCEMENT_READ_FIELDS && it !in BETA_VISIBLE_ANNOUNCEMENT_READ_FIELDS }
-        .distinct()
-    if (hidden.isEmpty()) return visible
-
-    val visibleSet = visible.toSet()
-    val merged = mutableListOf<AnnouncementReadField>()
-    var visibleIndex = 0
-    storedFields.forEach { field ->
-        when {
-            field in hidden -> merged += field
-            field in visibleSet -> {
-                if (visibleIndex < visible.size) merged += visible[visibleIndex++]
-            }
-        }
-    }
-    merged += visible.drop(visibleIndex)
-    return merged.distinct()
 }
 
 /**
@@ -288,7 +264,7 @@ fun List<AnnouncementReadField>.withLegacyAnnouncementOrder(
         AnnouncementOrder.DEFAULT -> null
         AnnouncementOrder.TITLE_FIRST -> AnnouncementReadField.TITLE
         AnnouncementOrder.ALBUM_FIRST -> AnnouncementReadField.ALBUM
-        AnnouncementOrder.TRACK_NUMBER_FIRST -> AnnouncementReadField.TRACK_NUMBER
+        AnnouncementOrder.TRACK_NUMBER_FIRST -> null
         AnnouncementOrder.ARTIST_FIRST -> AnnouncementReadField.ARTIST
         AnnouncementOrder.COLLECTION_FIRST -> AnnouncementReadField.COLLECTION
     } ?: return this

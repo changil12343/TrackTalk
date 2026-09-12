@@ -12,19 +12,20 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.trackvoice.metadata.ExternalMetadataCacheEntry
-import com.trackvoice.metadata.ExternalMetadataStatus
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import java.io.IOException
-import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
-import java.util.Base64
 
 private val Context.trackVoiceDataStore: DataStore<Preferences> by preferencesDataStore(
     name = "trackvoice_settings",
+)
+
+/** State that should remain on this device rather than participating in Android Auto Backup. */
+private val Context.trackVoicePrivateStateDataStore: DataStore<Preferences> by preferencesDataStore(
+    name = "trackvoice_private_state",
 )
 
 private fun appKey(packageName: String, suffix: String): Preferences.Key<String> =
@@ -35,6 +36,8 @@ private const val CONTENT_READ_ORDER_VERSION = 2
 private const val AUDIO_OUTPUT_POLICY_VERSION = 1
 private const val APP_ANNOUNCEMENT_SOURCE_VERSION = 1
 private const val PLAYBACK_CONTEXT_SETTINGS_VERSION = 1
+private const val RETIRED_TRACK_NUMBER_MIGRATION_VERSION = 1
+private const val PRIVATE_PLAYBACK_STATE_MIGRATION_VERSION = 1
 
 data class PersistedAnnouncement(
     val sourcePackageName: String,
@@ -53,6 +56,7 @@ data class PersistedAnnouncement(
 
 class DataStoreRepository(private val context: Context) {
     private val dataStore = context.trackVoiceDataStore
+    private val privateStateDataStore = context.trackVoicePrivateStateDataStore
 
     val userSettings: Flow<UserSettings> = dataStore.data
         .catch { error ->
@@ -66,36 +70,43 @@ class DataStoreRepository(private val context: Context) {
         }
         .map { preferences -> preferences.toAppSettings() }
 
-    val audioDeviceSettings: Flow<Map<String, AudioDeviceSettings>> = dataStore.data
-        .catch { error ->
+    val audioDeviceSettings: Flow<Map<String, AudioDeviceSettings>> = combine(
+        dataStore.data.catch { error ->
             if (error is IOException) emit(androidx.datastore.preferences.core.emptyPreferences()) else throw error
+        },
+        privateStateDataStore.data.catch { error ->
+            if (error is IOException) emit(androidx.datastore.preferences.core.emptyPreferences()) else throw error
+        },
+    ) { publicPreferences, privatePreferences ->
+        if ((publicPreferences[Keys.privatePlaybackStateMigrationVersion] ?: 0) >=
+                PRIVATE_PLAYBACK_STATE_MIGRATION_VERSION ||
+            privatePreferences[Keys.privatePlaybackStateInitialized] == true
+        ) {
+            privatePreferences.toAudioDeviceSettings()
+        } else {
+            publicPreferences.toAudioDeviceSettings()
         }
-        .map { preferences -> preferences.toAudioDeviceSettings() }
+    }
 
     suspend fun currentUserSettings(): UserSettings = userSettings.first()
     suspend fun currentAppSettings(): Map<String, AppSettings> = appSettings.first()
     suspend fun currentAudioDeviceSettings(): Map<String, AudioDeviceSettings> = audioDeviceSettings.first()
 
-    suspend fun currentPersistedAnnouncement(): PersistedAnnouncement? =
-        dataStore.data.first().toPersistedAnnouncement()
-
-    suspend fun readExternalMetadataCache(cacheKey: String): ExternalMetadataCacheEntry? =
-        dataStore.data.first()[externalMetadataKey(cacheKey)]?.let(::decodeExternalMetadataCache)
-
-    suspend fun writeExternalMetadataCache(cacheKey: String, entry: ExternalMetadataCacheEntry) {
-        dataStore.edit { preferences ->
-            preferences[externalMetadataKey(cacheKey)] = encodeExternalMetadataCache(entry)
-        }
-    }
-
-    internal suspend fun clearExternalMetadataCache(cacheKey: String) {
-        dataStore.edit { preferences ->
-            preferences.remove(externalMetadataKey(cacheKey))
+    suspend fun currentPersistedAnnouncement(): PersistedAnnouncement? {
+        val publicPreferences = dataStore.data.first()
+        val privatePreferences = privateStateDataStore.data.first()
+        return if ((publicPreferences[Keys.privatePlaybackStateMigrationVersion] ?: 0) >=
+                PRIVATE_PLAYBACK_STATE_MIGRATION_VERSION ||
+            privatePreferences[Keys.privatePlaybackStateInitialized] == true
+        ) {
+            privatePreferences.toPersistedAnnouncement()
+        } else {
+            publicPreferences.toPersistedAnnouncement()
         }
     }
 
     suspend fun savePersistedAnnouncement(announcement: PersistedAnnouncement) {
-        dataStore.edit { preferences ->
+        privateStateDataStore.edit { preferences ->
             preferences[Keys.lastAnnouncementPackage] = announcement.sourcePackageName
             preferences[Keys.lastAnnouncementAppName] = announcement.sourceAppName
             setOptional(preferences, Keys.lastAnnouncementTitle, announcement.title)
@@ -111,11 +122,12 @@ class DataStoreRepository(private val context: Context) {
             preferences[Keys.lastAnnouncementTrackNumberReliable] = announcement.trackNumberReliable
             preferences[Keys.lastAnnouncementTrackNumberSource] = announcement.trackNumberSource
             preferences[Keys.lastAnnouncementAt] = announcement.announcedAt
+            preferences[Keys.privatePlaybackStateInitialized] = true
         }
     }
 
     suspend fun clearPersistedAnnouncement() {
-        dataStore.edit { preferences ->
+        privateStateDataStore.edit { preferences ->
             preferences.remove(Keys.lastAnnouncementPackage)
             preferences.remove(Keys.lastAnnouncementAppName)
             preferences.remove(Keys.lastAnnouncementTitle)
@@ -128,6 +140,7 @@ class DataStoreRepository(private val context: Context) {
             preferences.remove(Keys.lastAnnouncementTrackNumberReliable)
             preferences.remove(Keys.lastAnnouncementTrackNumberSource)
             preferences.remove(Keys.lastAnnouncementAt)
+            preferences[Keys.privatePlaybackStateInitialized] = true
         }
     }
 
@@ -141,6 +154,96 @@ class DataStoreRepository(private val context: Context) {
             if (preferences[Keys.announcementVolumeMode] != mode.name) {
                 preferences[Keys.announcementVolumeMode] = mode.name
             }
+        }
+    }
+
+    /**
+     * Retires the hidden Track Number configuration that previously enabled an
+     * external catalog request. Existing choices retain every supported local
+     * field, and a Track Number-only choice falls back to Title.
+     */
+    suspend fun migrateRetiredTrackNumberState() {
+        dataStore.edit { preferences ->
+            if ((preferences[Keys.retiredTrackNumberMigrationVersion] ?: 0) >=
+                RETIRED_TRACK_NUMBER_MIGRATION_VERSION
+            ) {
+                return@edit
+            }
+            val legacyOrder = enumOrDefault(
+                preferences[Keys.announcementOrder],
+                AnnouncementOrder.DEFAULT,
+            )
+            val migratedFields = orderedFieldsFromStorage(
+                storedOrder = preferences[Keys.defaultReadOrder],
+                legacyFields = preferences[Keys.defaultReadFields],
+                allowedFields = GLOBAL_ANNOUNCEMENT_READ_FIELDS,
+                fallbackFields = DEFAULT_GLOBAL_ENABLED_READ_FIELDS,
+                legacyOrder = legacyOrder,
+            )
+            preferences[Keys.defaultReadFields] = migratedFields.map(AnnouncementReadField::name).toSet()
+            preferences[Keys.defaultReadOrder] = migratedFields.encodeReadFields()
+            val albumFields = orderedFieldsFromStorage(
+                storedOrder = preferences[Keys.albumReadOrder],
+                legacyFields = preferences[Keys.albumReadFields],
+                allowedFields = DEFAULT_ALBUM_READ_FIELDS,
+                fallbackFields = DEFAULT_ALBUM_READ_FIELDS,
+                legacyOrder = legacyOrder,
+            )
+            preferences[Keys.albumReadFields] = albumFields.map(AnnouncementReadField::name).toSet()
+            preferences[Keys.albumReadOrder] = albumFields.encodeReadFields()
+            val playlistFields = orderedFieldsFromStorage(
+                storedOrder = preferences[Keys.playlistReadOrder],
+                legacyFields = preferences[Keys.playlistReadFields],
+                allowedFields = DEFAULT_PLAYLIST_READ_FIELDS,
+                fallbackFields = DEFAULT_PLAYLIST_READ_FIELDS,
+                legacyOrder = legacyOrder,
+            )
+            preferences[Keys.playlistReadFields] = playlistFields.map(AnnouncementReadField::name).toSet()
+            preferences[Keys.playlistReadOrder] = playlistFields.encodeReadFields()
+            val algorithmFields = orderedFieldsFromStorage(
+                storedOrder = preferences[Keys.algorithmReadOrder],
+                legacyFields = preferences[Keys.algorithmReadFields],
+                allowedFields = DEFAULT_ALGORITHMIC_READ_FIELDS,
+                fallbackFields = DEFAULT_ALGORITHMIC_READ_FIELDS,
+                legacyOrder = legacyOrder,
+            )
+            preferences[Keys.algorithmReadFields] = algorithmFields.map(AnnouncementReadField::name).toSet()
+            preferences[Keys.algorithmReadOrder] = algorithmFields.encodeReadFields()
+            preferences[Keys.announcementOrder] = AnnouncementOrder.DEFAULT.name
+            preferences.asMap().keys
+                .map { it.name }
+                .filter { it.startsWith(EXTERNAL_METADATA_KEY_PREFIX) }
+                .forEach { preferences.remove(stringPreferencesKey(it)) }
+            preferences[Keys.retiredTrackNumberMigrationVersion] = RETIRED_TRACK_NUMBER_MIGRATION_VERSION
+        }
+    }
+
+    /**
+     * Moves recent media and stable output-device state into a separately
+     * excluded backup file. Copying first keeps an interrupted upgrade from
+     * losing duplicate-suppression or device choices.
+     */
+    suspend fun migratePrivatePlaybackStateForBackup() {
+        val publicPreferences = dataStore.data.first()
+        if ((publicPreferences[Keys.privatePlaybackStateMigrationVersion] ?: 0) >=
+            PRIVATE_PLAYBACK_STATE_MIGRATION_VERSION
+        ) {
+            return
+        }
+        privateStateDataStore.edit { privatePreferences ->
+            if (privatePreferences[Keys.privatePlaybackStateInitialized] != true) {
+                privatePreferences.copyPrivatePlaybackStateFrom(publicPreferences)
+                privatePreferences[Keys.privatePlaybackStateInitialized] = true
+            }
+        }
+        dataStore.edit { preferences ->
+            if ((preferences[Keys.privatePlaybackStateMigrationVersion] ?: 0) >=
+                PRIVATE_PLAYBACK_STATE_MIGRATION_VERSION
+            ) {
+                return@edit
+            }
+            preferences.removePrivatePlaybackState()
+            preferences[Keys.privatePlaybackStateMigrationVersion] = PRIVATE_PLAYBACK_STATE_MIGRATION_VERSION
         }
     }
 
@@ -327,11 +430,12 @@ class DataStoreRepository(private val context: Context) {
     }
 
     suspend fun updateAudioDeviceSettings(settings: AudioDeviceSettings) {
-        dataStore.edit { preferences ->
+        privateStateDataStore.edit { preferences ->
             val keys = preferences[Keys.knownDeviceKeys].orEmpty().toMutableSet()
             keys += settings.deviceKey
             preferences[Keys.knownDeviceKeys] = keys
             preferences.writeAudioDeviceSettings(settings)
+            preferences[Keys.privatePlaybackStateInitialized] = true
         }
     }
 
@@ -341,7 +445,7 @@ class DataStoreRepository(private val context: Context) {
         legacyKeys: Set<String>,
     ): AudioDeviceSettings {
         var reconciled = AudioDeviceSettings(canonicalKey, displayName)
-        dataStore.edit { preferences ->
+        privateStateDataStore.edit { preferences ->
             val knownKeys = preferences[Keys.knownDeviceKeys].orEmpty().toMutableSet()
             val aliases = legacyKeys - canonicalKey
             val candidateKeys = buildSet {
@@ -364,19 +468,21 @@ class DataStoreRepository(private val context: Context) {
             knownKeys += canonicalKey
             preferences[Keys.knownDeviceKeys] = knownKeys
             preferences.writeAudioDeviceSettings(reconciled)
+            preferences[Keys.privatePlaybackStateInitialized] = true
         }
         return reconciled
     }
 
     suspend fun removeAudioDeviceSettings(deviceKeys: Set<String>) {
         if (deviceKeys.isEmpty()) return
-        dataStore.edit { preferences ->
+        privateStateDataStore.edit { preferences ->
             val knownKeys = preferences[Keys.knownDeviceKeys].orEmpty().toMutableSet()
             deviceKeys.forEach { key ->
                 preferences.removeAudioDeviceSettings(key)
                 knownKeys -= key
             }
             preferences[Keys.knownDeviceKeys] = knownKeys
+            preferences[Keys.privatePlaybackStateInitialized] = true
         }
     }
 
@@ -447,6 +553,9 @@ class DataStoreRepository(private val context: Context) {
         val contentReadOrderVersion = intPreferencesKey("content_read_order_version")
         val playbackContextSettingsVersion = intPreferencesKey("playback_context_settings_version")
         val appAnnouncementSourceVersion = intPreferencesKey("app_announcement_source_version")
+        val retiredTrackNumberMigrationVersion = intPreferencesKey("retired_track_number_migration_version")
+        val privatePlaybackStateMigrationVersion = intPreferencesKey("private_playback_state_migration_version")
+        val privatePlaybackStateInitialized = booleanPreferencesKey("private_playback_state_initialized")
         val raiseDeviceVolume = booleanPreferencesKey("raise_device_volume")
         val deviceVolumePercent = intPreferencesKey("device_volume_percent")
         val knownPackages = stringSetPreferencesKey("known_app_packages")
@@ -860,52 +969,51 @@ private fun MutablePreferences.removeAudioDeviceSettings(key: String) {
     remove(deviceBooleanKey(key, "enabled"))
 }
 
-private fun externalMetadataKey(cacheKey: String): Preferences.Key<String> =
-    stringPreferencesKey("external_metadata.${sha256(cacheKey)}")
+private const val EXTERNAL_METADATA_KEY_PREFIX = "external_metadata."
 
-private fun sha256(value: String): String = MessageDigest
-    .getInstance("SHA-256")
-    .digest(value.toByteArray(StandardCharsets.UTF_8))
-    .joinToString("") { byte -> "%02x".format(byte) }
-
-private fun encodeExternalMetadataCache(entry: ExternalMetadataCacheEntry): String = listOf(
-    entry.status.name,
-    entry.provider,
-    entry.confidence.toString(),
-    entry.trackNumber?.toString().orEmpty(),
-    entry.trackCount?.toString().orEmpty(),
-    entry.discNumber?.toString().orEmpty(),
-    entry.canonicalTitle.encodeCacheValue(),
-    entry.canonicalArtist.encodeCacheValue(),
-    entry.canonicalAlbum.encodeCacheValue(),
-    entry.durationMs?.toString().orEmpty(),
-    entry.resolvedAt.toString(),
-).joinToString("|")
-
-private fun decodeExternalMetadataCache(value: String): ExternalMetadataCacheEntry? {
-    val fields = value.split('|')
-    if (fields.size != 11) return null
-    return runCatching {
-        ExternalMetadataCacheEntry(
-            status = ExternalMetadataStatus.valueOf(fields[0]),
-            provider = fields[1],
-            confidence = fields[2].toDouble(),
-            trackNumber = fields[3].toIntOrNull(),
-            trackCount = fields[4].toIntOrNull(),
-            discNumber = fields[5].toIntOrNull(),
-            canonicalTitle = fields[6].decodeCacheValue(),
-            canonicalArtist = fields[7].decodeCacheValue(),
-            canonicalAlbum = fields[8].decodeCacheValue(),
-            durationMs = fields[9].toLongOrNull(),
-            resolvedAt = fields[10].toLong(),
-        )
-    }.getOrNull()
+private fun MutablePreferences.copyPrivatePlaybackStateFrom(source: Preferences) {
+    source[DataStoreRepository.Keys.knownDeviceKeys]?.let { deviceKeys ->
+        this[DataStoreRepository.Keys.knownDeviceKeys] = deviceKeys
+        deviceKeys.forEach { key ->
+            copyPreference(source, deviceKey(key, "name"))
+            copyPreference(source, deviceBooleanKey(key, "auto_enable"))
+            copyPreference(source, deviceBooleanKey(key, "enabled"))
+        }
+    }
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementPackage)
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementAppName)
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementTitle)
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementArtist)
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementAlbum)
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementTrackNumber)
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementDiscNumber)
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementDuration)
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementMediaId)
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementTrackNumberReliable)
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementTrackNumberSource)
+    copyPreference(source, DataStoreRepository.Keys.lastAnnouncementAt)
 }
 
-private fun String?.encodeCacheValue(): String = this
-    ?.toByteArray(StandardCharsets.UTF_8)
-    ?.let(Base64.getEncoder()::encodeToString)
-    .orEmpty()
+private fun MutablePreferences.removePrivatePlaybackState() {
+    this[DataStoreRepository.Keys.knownDeviceKeys].orEmpty().forEach(::removeAudioDeviceSettings)
+    remove(DataStoreRepository.Keys.knownDeviceKeys)
+    remove(DataStoreRepository.Keys.lastAnnouncementPackage)
+    remove(DataStoreRepository.Keys.lastAnnouncementAppName)
+    remove(DataStoreRepository.Keys.lastAnnouncementTitle)
+    remove(DataStoreRepository.Keys.lastAnnouncementArtist)
+    remove(DataStoreRepository.Keys.lastAnnouncementAlbum)
+    remove(DataStoreRepository.Keys.lastAnnouncementTrackNumber)
+    remove(DataStoreRepository.Keys.lastAnnouncementDiscNumber)
+    remove(DataStoreRepository.Keys.lastAnnouncementDuration)
+    remove(DataStoreRepository.Keys.lastAnnouncementMediaId)
+    remove(DataStoreRepository.Keys.lastAnnouncementTrackNumberReliable)
+    remove(DataStoreRepository.Keys.lastAnnouncementTrackNumberSource)
+    remove(DataStoreRepository.Keys.lastAnnouncementAt)
+}
 
-private fun String.decodeCacheValue(): String? = takeIf { it.isNotEmpty() }
-    ?.let { runCatching { String(Base64.getDecoder().decode(it), StandardCharsets.UTF_8) }.getOrNull() }
+private fun <T> MutablePreferences.copyPreference(
+    source: Preferences,
+    key: Preferences.Key<T>,
+) {
+    source[key]?.let { this[key] = it }
+}

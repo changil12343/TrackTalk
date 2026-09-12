@@ -93,7 +93,6 @@ enum class TrackNumberSource {
     MEDIA_METADATA,
     QUEUE_ITEM_METADATA,
     CACHED_QUEUE_ITEM_METADATA,
-    EXTERNAL_CATALOG,
 }
 
 object AlbumTrackNumberResolver {

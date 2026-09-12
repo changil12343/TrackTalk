@@ -360,6 +360,10 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
     val voiceSelection: String get() = t("음성 선택", "Voice")
     val defaultVoiceLanguage: String get() = t("기본 언어", "Speech language")
     val voiceLanguageHint: String get() = t("한글·영문·일문·중문이 섞이면 구간별 음성으로 자동 전환합니다.", "Mixed Korean, English, Japanese, and Chinese text switches voice by segment.")
+    val ttsPrivacySummary: String get() = t(
+        "안내 문구에는 현재 재생 정보가 포함될 수 있으며 선택한 Android TTS 엔진에 전달됩니다. 일부 음성은 네트워크 처리를 사용할 수 있고, 처리 방식은 해당 제공업체의 정책을 따릅니다.",
+        "Announcement text can include current media information and is sent to your selected Android TTS engine. Some voices may use network processing, which is governed by that provider's policies.",
+    )
     val gender: String get() = t("성별", "Gender")
     val voice: String get() = t("목소리", "Voice")
     val autoSelect: String get() = t("자동 선택", "Automatic")
@@ -411,7 +415,16 @@ class TrackTalkStrings private constructor(private val language: AppLanguage) {
     val feedbackDeveloperSummary: String get() = t("의견이나 문제를 이메일로 보내 주세요.", "Send feedback or report a problem by email.")
     val noEmailApp: String get() = t("사용할 수 있는 이메일 앱이 없습니다.", "No compatible email app is available.")
     val privacy: String get() = t("개인정보", "Privacy")
-    val privacySummary: String get() = t("곡 정보는 안내에만 사용하며 서버에 저장하지 않습니다.", "Track information is used only for announcements and is not stored on a server.")
+    val privacySummary: String get() = t(
+        "현재 재생 정보는 TrackTalk 기능과 음성 안내에 사용되며, 안내 문구는 선택한 Android TTS 엔진에 전달될 수 있습니다. TrackTalk은 사용자 계정이나 자체 음악 정보 서버를 운영하지 않으며, 구매는 Google Play에서 처리합니다.",
+        "Current media information is used for TrackTalk features and voice announcements, and announcement text can be sent to the selected Android TTS engine. TrackTalk has no user accounts or its own music-metadata backend, and purchases are handled by Google Play.",
+    )
+    val privacyPolicy: String get() = t("개인정보 처리방침", "Privacy policy")
+    val privacyPolicySummary: String get() = t("개인정보 처리방침을 확인합니다.", "View the privacy policy.")
+    val privacyPolicyUnavailable: String get() = t(
+        "출시 전에 개인정보 처리방침 URL을 설정해야 합니다.",
+        "A privacy policy URL must be configured before release.",
+    )
     val currentTrackInfo: String get() = t("현재 곡 정보", "Current track information")
     val titleMissing: String get() = t("곡명 없음", "No track title")
     val artistMissing: String get() = t("아티스트 없음", "No artist")

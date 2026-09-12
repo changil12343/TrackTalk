@@ -3,8 +3,6 @@ package com.trackvoice.data
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.core.app.ApplicationProvider
-import com.trackvoice.metadata.ExternalMetadataCacheEntry
-import com.trackvoice.metadata.ExternalMetadataStatus
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
@@ -249,7 +247,7 @@ class DataStoreRepositoryInstrumentedTest {
         val repository = DataStoreRepository(context)
         val original = repository.currentUserSettings()
         val selectedOrder = listOf(
-            AnnouncementReadField.TRACK_NUMBER,
+            AnnouncementReadField.ALBUM,
             AnnouncementReadField.TITLE,
         )
 
@@ -370,30 +368,4 @@ class DataStoreRepositoryInstrumentedTest {
         }
     }
 
-    @Test
-    fun externalMetadataCacheSurvivesRepositoryRecreation() = runBlocking {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val repository = DataStoreRepository(context)
-        val cacheKey = "instrumented-cache-${System.currentTimeMillis()}"
-        val entry = ExternalMetadataCacheEntry(
-            status = ExternalMetadataStatus.MATCHED,
-            provider = "TEST_PROVIDER",
-            confidence = 0.97,
-            trackNumber = 4,
-            trackCount = 22,
-            discNumber = 1,
-            canonicalTitle = "Chicago",
-            canonicalArtist = "Sufjan Stevens",
-            canonicalAlbum = "Illinois",
-            durationMs = 342_000L,
-            resolvedAt = 123_456L,
-        )
-
-        try {
-            repository.writeExternalMetadataCache(cacheKey, entry)
-            assertEquals(entry, DataStoreRepository(context).readExternalMetadataCache(cacheKey))
-        } finally {
-            repository.clearExternalMetadataCache(cacheKey)
-        }
-    }
 }

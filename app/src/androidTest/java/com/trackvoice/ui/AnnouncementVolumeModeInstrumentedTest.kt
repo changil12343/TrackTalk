@@ -63,6 +63,9 @@ class AnnouncementVolumeModeInstrumentedTest {
 
         val sliderMatcher = SemanticsMatcher.keyIsDefined(SemanticsProperties.ProgressBarRangeInfo)
         composeRule.onNodeWithText("안내 음성 음량").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText(
+            "안내 문구에는 현재 재생 정보가 포함될 수 있으며 선택한 Android TTS 엔진에 전달됩니다. 일부 음성은 네트워크 처리를 사용할 수 있고, 처리 방식은 해당 제공업체의 정책을 따릅니다.",
+        ).performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithText("음악 볼륨 따르기").assertIsDisplayed()
         composeRule.onNodeWithText("휴대폰의 미디어 볼륨을 따릅니다.").assertIsDisplayed()
         composeRule.onNodeWithText("직접 설정 음량").assertDoesNotExist()

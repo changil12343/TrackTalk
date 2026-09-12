@@ -90,11 +90,10 @@ When changing playback behavior, retain or add coverage for:
 
 ## Metadata tests
 
-External metadata tests are deterministic fakes, never live-network JVM tests.
-Cover exact matches, duration-assisted variants, edition normalization, artist
-or album mismatch, equally strong ambiguity, multi-disc fields, rate limit,
-malformed/empty responses, cache freshness, negative cache, and timeout.
-The expected safe failure is a normal local announcement without a number.
+Cover player-provided title, artist, album, reliable direct/queue-item track
+number provenance, and queue-index rejection. V1 never performs a network
+lookup or external-catalog enrichment; missing or ambiguous metadata must stay
+missing rather than being fabricated.
 
 ## Real-device procedure
 

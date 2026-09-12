@@ -6,7 +6,6 @@ import org.junit.Test
 class AnnouncementReadFieldsTest {
     private val albumFields = listOf(
         AnnouncementReadField.ALBUM,
-        AnnouncementReadField.TRACK_NUMBER,
         AnnouncementReadField.TITLE,
         AnnouncementReadField.ARTIST,
     )
@@ -113,7 +112,6 @@ class AnnouncementReadFieldsTest {
     fun disablingPreservesActiveOrderAndReenablingAppends() {
         val fields = listOf(
             AnnouncementReadField.ALBUM,
-            AnnouncementReadField.TRACK_NUMBER,
             AnnouncementReadField.TITLE,
             AnnouncementReadField.ARTIST,
         )
@@ -125,7 +123,6 @@ class AnnouncementReadFieldsTest {
         )
         assertEquals(
             listOf(
-                AnnouncementReadField.TRACK_NUMBER,
                 AnnouncementReadField.TITLE,
                 AnnouncementReadField.ARTIST,
             ),
@@ -133,7 +130,6 @@ class AnnouncementReadFieldsTest {
         )
         assertEquals(
             listOf(
-                AnnouncementReadField.TRACK_NUMBER,
                 AnnouncementReadField.TITLE,
                 AnnouncementReadField.ARTIST,
                 AnnouncementReadField.ALBUM,
@@ -252,7 +248,7 @@ class AnnouncementReadFieldsTest {
     }
 
     @Test
-    fun betaVisibleFieldsDoNotExposeTrackNumber() {
+    fun v1ReadFieldsExcludeRetiredTrackNumber() {
         assertEquals(
             listOf(
                 AnnouncementReadField.TITLE,
@@ -281,26 +277,25 @@ class AnnouncementReadFieldsTest {
     }
 
     @Test
-    fun hidingTrackNumberPreservesItsStoredPositionForFutureReenablement() {
+    fun retiredTrackNumberOnlyStorageFallsBackToTitle() {
         assertEquals(
-            listOf(
-                AnnouncementReadField.ALBUM,
-                AnnouncementReadField.TRACK_NUMBER,
-                AnnouncementReadField.TITLE,
-                AnnouncementReadField.ARTIST,
+            listOf(AnnouncementReadField.TITLE),
+            orderedFieldsFromStorage(
+                storedOrder = AnnouncementReadField.TRACK_NUMBER.name,
+                legacyFields = setOf(AnnouncementReadField.TRACK_NUMBER.name),
+                allowedFields = GLOBAL_ANNOUNCEMENT_READ_FIELDS,
+                fallbackFields = DEFAULT_GLOBAL_ENABLED_READ_FIELDS,
+                legacyOrder = AnnouncementOrder.TRACK_NUMBER_FIRST,
             ),
-            mergeBetaVisibleAnnouncementReadFields(
-                storedFields = listOf(
-                    AnnouncementReadField.ALBUM,
-                    AnnouncementReadField.TRACK_NUMBER,
-                    AnnouncementReadField.TITLE,
-                    AnnouncementReadField.ARTIST,
-                ),
-                visibleFields = listOf(
-                    AnnouncementReadField.ALBUM,
-                    AnnouncementReadField.TITLE,
-                    AnnouncementReadField.ARTIST,
-                ),
+        )
+        assertEquals(
+            listOf(AnnouncementReadField.ALBUM, AnnouncementReadField.TITLE),
+            orderedFieldsFromStorage(
+                storedOrder = "ALBUM,TRACK_NUMBER,TITLE",
+                legacyFields = null,
+                allowedFields = GLOBAL_ANNOUNCEMENT_READ_FIELDS,
+                fallbackFields = DEFAULT_GLOBAL_ENABLED_READ_FIELDS,
+                legacyOrder = AnnouncementOrder.DEFAULT,
             ),
         )
     }

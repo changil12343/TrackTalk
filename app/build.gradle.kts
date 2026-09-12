@@ -64,6 +64,20 @@ val requireReleaseSigning = when (releaseSigningRequirement) {
     )
 }
 
+// The release operator supplies the public, non-geofenced policy URL. Empty
+// is intentionally visible in-app as an incomplete release configuration.
+val privacyPolicyUrl = providers
+    .gradleProperty("tracktalk.privacyPolicyUrl")
+    .orNull
+    ?.trim()
+    .orEmpty()
+if (privacyPolicyUrl.isNotEmpty() && !privacyPolicyUrl.startsWith("https://")) {
+    throw GradleException("tracktalk.privacyPolicyUrl must use https://.")
+}
+val escapedPrivacyPolicyUrl = privacyPolicyUrl
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
 if (releaseSigningInputPresent && !releaseSigningConfigured) {
     throw GradleException(
         "Release signing credentials are incomplete. Provide storeFile, " +
@@ -96,6 +110,7 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
+        buildConfigField("String", "PRIVACY_POLICY_URL", "\"$escapedPrivacyPolicyUrl\"")
     }
 
     signingConfigs {

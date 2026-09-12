@@ -345,6 +345,9 @@ fun TrackVoiceApp(viewModel: TrackVoiceViewModel, activity: Activity) {
                     onFeedback = {
                         openFeedbackEmail(context, strings.noEmailApp)
                     },
+                    onOpenPrivacyPolicy = {
+                        openPrivacyPolicy(context, strings.privacyPolicyUnavailable)
+                    },
                 )
 
                 AppSection.DIAGNOSTICS -> DiagnosticsScreen(
@@ -1304,6 +1307,7 @@ internal fun DeviceSettingsScreen(
     onOpenPremium: () -> Unit,
     onOpenDiagnostics: () -> Unit,
     onFeedback: () -> Unit,
+    onOpenPrivacyPolicy: () -> Unit = {},
 ) {
     val strings = LocalTrackTalkStrings.current
     LazyColumn(
@@ -1389,16 +1393,32 @@ internal fun DeviceSettingsScreen(
             }
         }
         item {
-            AppInfoCard(onFeedback = onFeedback)
+            AppInfoCard(
+                onFeedback = onFeedback,
+                onOpenPrivacyPolicy = onOpenPrivacyPolicy,
+            )
         }
     }
 }
 
 @Composable
-internal fun AppInfoCard(onFeedback: () -> Unit) {
+internal fun AppInfoCard(
+    onFeedback: () -> Unit,
+    onOpenPrivacyPolicy: () -> Unit = {},
+) {
     val strings = LocalTrackTalkStrings.current
     SettingCard(strings.appInfoTitle) {
         InfoRow(strings.versionLabel, "v${BuildConfig.VERSION_NAME}")
+        if (TrackTalkPrivacyPolicy.isConfigured) {
+            NavigationEntryContent(
+                title = strings.privacyPolicy,
+                summary = strings.privacyPolicySummary,
+                showPlusBadge = false,
+                onClick = onOpenPrivacyPolicy,
+            )
+        } else {
+            InfoRow(strings.privacyPolicy, strings.privacyPolicyUnavailable)
+        }
         NavigationEntryContent(
             title = strings.feedbackDeveloper,
             summary = strings.feedbackDeveloperSummary,
@@ -1422,6 +1442,16 @@ private fun openFeedbackEmail(context: Context, noEmailAppMessage: String) {
     }.onFailure {
         Toast.makeText(context, noEmailAppMessage, Toast.LENGTH_SHORT).show()
     }
+}
+
+private fun openPrivacyPolicy(context: Context, unavailableMessage: String) {
+    val intent = TrackTalkPrivacyPolicy.createIntent()
+    if (intent == null || intent.resolveActivity(context.packageManager) == null) {
+        Toast.makeText(context, unavailableMessage, Toast.LENGTH_SHORT).show()
+        return
+    }
+    runCatching { context.startActivity(intent) }
+        .onFailure { Toast.makeText(context, unavailableMessage, Toast.LENGTH_SHORT).show() }
 }
 
 @Composable
@@ -1735,6 +1765,11 @@ internal fun VoiceSettingsScreen(
                 }
                 Text(
                     strings.voiceLanguageHint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    strings.ttsPrivacySummary,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

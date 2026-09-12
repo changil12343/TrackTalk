@@ -41,6 +41,8 @@ class AppInfoCardInstrumentedTest {
         composeRule.onNodeWithText("앱 정보").assertIsDisplayed()
         composeRule.onNodeWithText("버전").assertIsDisplayed()
         composeRule.onNodeWithText("v${BuildConfig.VERSION_NAME}").assertIsDisplayed()
+        composeRule.onNodeWithText("개인정보 처리방침").assertIsDisplayed()
+        composeRule.onNodeWithText("출시 전에 개인정보 처리방침 URL을 설정해야 합니다.").assertIsDisplayed()
         composeRule.onNodeWithText("피드백 보내기").assertIsDisplayed()
         composeRule.onNodeWithText("의견이나 문제를 이메일로 보내 주세요.").assertIsDisplayed()
         composeRule.onNodeWithText("빌드 번호").assertDoesNotExist()
@@ -67,6 +69,8 @@ class AppInfoCardInstrumentedTest {
         }
 
         composeRule.onNodeWithText("Version").assertIsDisplayed()
+        composeRule.onNodeWithText("Privacy policy").assertIsDisplayed()
+        composeRule.onNodeWithText("A privacy policy URL must be configured before release.").assertIsDisplayed()
         composeRule.onNodeWithText("Send feedback").assertIsDisplayed()
         composeRule.onNodeWithText("Send feedback or report a problem by email.").assertIsDisplayed()
         composeRule.onNodeWithText("Build number").assertDoesNotExist()

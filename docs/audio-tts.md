@@ -75,6 +75,11 @@ synthetic gap. See [Rejected experiments](experiments/rejected-approaches.md).
 listener, and uses replacement semantics so a new preview or announcement does
 not stack on old speech.
 
+Announcement text can contain current media information and is passed to the
+Android TTS engine selected by the user. Some voices may use network processing;
+that processing and any provider-side handling are governed by the selected TTS
+provider, not by TrackTalk.
+
 The engine:
 
 - segments mixed-language text before speech;

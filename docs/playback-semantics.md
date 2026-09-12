@@ -251,38 +251,22 @@ alone must never be promoted to source intent.
 reliable:
 
 1. direct player MediaMetadata;
-2. queue-item metadata or a stable cached queue-item value; or
-3. a high-confidence external catalog match.
+2. queue-item metadata or a stable cached queue-item value.
 
 Queue index and “the Nth song heard” are expressly forbidden. A shuffled or
 reordered queue does not invalidate a genuine explicit player number, but it
 also never creates a number from its position.
 
-### External metadata capability
-
-`ExternalTrackMetadataResolver` is provider independent. The current iTunes
-Search adapter sends title, artist, album, and optional duration to find a
-canonical track number. It uses normalized exact/edition-neutral comparisons,
-minimum confidence `0.86`, and a minimum winner margin `0.08`. Artist/album
-evidence and duration proximity improve matching; ambiguous, missing,
-rate-limited, malformed, or timed-out results produce no number.
-
-Cache identity uses normalized title/artist/album. Successful matches are kept
-for 30 days; ambiguous/not-found results are negatively cached for 6 hours;
-transient failures for 5 minutes. A current-utterance lookup is bounded and
-never causes a second announcement after it returns.
-
-This is intentionally a hidden beta capability: Track Number is filtered from
-the current beta UI and runtime field selection. Do not represent external
-lookup as a shipped user-visible guarantee until end-to-end provider validation
-and product approval explicitly change that boundary.
+Track Number is retired from v1 announcement settings. A persisted legacy
+Track Number-only selection safely falls back to Title; a mixed selection
+retains its supported local fields. TrackTalk never queries an external catalog
+to infer a number.
 
 ## Next-track preparation
 
 When the queue exposes an unambiguous next item, `NextTrackPrefetch` may retain
 its identity and available metadata. The controller can pre-format candidate
-text, resolve a voice plan, and start a metadata-only external lookup while the
-current track plays.
+text and resolve a voice plan while the current track plays.
 
 Preparation is never playback authority:
 

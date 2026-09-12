@@ -44,7 +44,7 @@ not recreate those decisions independently.
 | Duplicate/restore state | `DuplicateSuppressor`, `PlaybackRestoreLease`, `PlaybackRestoreObligation` | Prevents callback churn from speaking twice. Selected Pause mode permits one exact, memory-only owned-pause restore only after independent TTS-terminal and pause-acknowledgement conditions. Keep and default system duck create no lease. |
 | Audio/TTS | `TtsEngine`, `AudioFocusManager`, `TrackTalkAudioAttributes` | Selects Android voices, speaks text, and uses semantic focus/attributes. |
 | Route/device model | `AudioOutputDetector`, `AudioDeviceMonitor`, `LogicalAudioDevice` | Separates the active media route from connected-device inventory. |
-| Persistence | `data/DataStoreRepository`, `SettingsModels` | Stores settings, safe migrations, app eligibility, cached metadata, and persisted duplicate state. |
+| Persistence | `data/DataStoreRepository`, `SettingsModels` | Stores settings, safe migrations, app eligibility, and persisted duplicate state. |
 | UI/localization | `ui/TrackVoiceApp`, `TrackTalkStrings`, `localization/LocalizedResources` | Compose screens, resource strings, and app-language presentation. |
 
 ## State ownership
@@ -58,7 +58,9 @@ before runtime policy uses settings.
 The controller keeps ephemeral state in memory: the selected controller,
 pending token/job, speech generation, prepared next track, duration pre-arm
 token/job, audio-route snapshot, and active restore lease. It persists only what must survive process
-recreation, such as the last accepted announcement and metadata cache entries.
+recreation, such as the last accepted announcement. Recent media metadata and
+per-device route identity live in a separate DataStore file excluded from
+Android Auto Backup.
 
 ## Lifecycle rules
 
@@ -84,19 +86,13 @@ recreation, such as the last accepted announcement and metadata cache entries.
   call TTS or control playback; a confirmed current-track event still enters
   the normal announcement gate.
 
-## External metadata boundary
+## Metadata boundary
 
-`metadata/ExternalTrackMetadata.kt` defines a provider-independent resolver
-contract. The current adapter is `ItunesTrackMetadataResolver`; it receives
-only public title, artist, album, and optional duration. It never receives an
-account identifier, device identifier, playback history, settings, artwork, or
-audio.
-
-The resolver/cache is isolated from normal session mapping. A lookup is
-best-effort metadata enrichment, cannot block normal local speech, and must
-never cause a second announcement. In the current beta UI, track number is
-hidden, so the adapter remains a prepared capability rather than a visible
-user promise. See [Playback semantics](playback-semantics.md).
+TrackTalk formats announcements solely from the observed Android
+`MediaSession` snapshot and local settings. v1 does not query an external music
+catalog or transmit media title, artist, album, or duration to enrich metadata.
+Missing or ambiguous player metadata remains missing rather than being guessed.
+See [Playback semantics](playback-semantics.md).
 
 ## Build shape
 

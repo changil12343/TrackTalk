@@ -17,6 +17,7 @@ import com.trackvoice.media.PlaybackCollection
 import com.trackvoice.monetization.PremiumMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppLanguageTest {
@@ -89,6 +90,20 @@ class AppLanguageTest {
             "Announcement voice: follows media volume",
             TrackTalkStrings.forLanguage(AppLanguage.ENGLISH, "ko").defaultFollowMediaVolume,
         )
+    }
+
+    @Test
+    fun privacyCopyDisclosesTheSelectedTtsEngineAndProviderBoundary() {
+        val korean = TrackTalkStrings.forLanguage(AppLanguage.KOREAN, "en")
+        val english = TrackTalkStrings.forLanguage(AppLanguage.ENGLISH, "ko")
+
+        assertTrue(korean.ttsPrivacySummary.contains("Android TTS 엔진"))
+        assertTrue(korean.ttsPrivacySummary.contains("네트워크"))
+        assertTrue(korean.ttsPrivacySummary.contains("제공업체"))
+        assertTrue(english.ttsPrivacySummary.contains("Android TTS engine"))
+        assertTrue(english.ttsPrivacySummary.contains("network processing"))
+        assertTrue(english.ttsPrivacySummary.contains("provider's policies"))
+        assertTrue(english.privacySummary.contains("Google Play"))
     }
 
     @Test

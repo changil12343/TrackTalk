@@ -64,7 +64,7 @@ unsigned release artifact is a validation output, not a publishable build.
 The beta promise is the core utility: observe a supported active MediaSession,
 speak selected local metadata once, and leave media in the correct state. It
 does not promise that every player reveals playback-source intent or canonical
-track number. Track Number is hidden in the current beta UI.
+track number. Track Number is retired from the v1 announcement surface.
 
 Ads are deferred. Plus must remain a convenience/personalization/automation
 upgrade rather than a repair for core detection, speech, or reliability.

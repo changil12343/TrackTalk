@@ -6,7 +6,7 @@ import org.junit.Test
 
 class AlbumTrackNumberResolverTest {
     @Test
-    fun canonicalTrackNumberIsNotRejectedByShortProviderQueue() {
+    fun playerMetadataTrackNumberIsNotRejectedByShortProviderQueue() {
         val event = event(
             trackNumber = 4,
             totalTracks = null,
@@ -14,7 +14,7 @@ class AlbumTrackNumberResolverTest {
                 QueueItemSnapshot(mediaId = "current", title = "Track 4", artist = "Artist"),
                 QueueItemSnapshot(mediaId = "next", title = "Track 9", artist = "Artist"),
             ),
-            trackNumberSource = TrackNumberSource.EXTERNAL_CATALOG,
+            trackNumberSource = TrackNumberSource.MEDIA_METADATA,
         )
 
         assertEquals(4, AlbumTrackNumberResolver.resolve(event))

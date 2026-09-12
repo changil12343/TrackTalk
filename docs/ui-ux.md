@@ -67,8 +67,8 @@ available canonical order `Title → Artist → Album`. A tap enables/disables a
 field; a long press and drag reorders active fields. Turning off a chip closes
 the active gap without scrolling the viewport to an inactive chip.
 
-Track Number is deliberately hidden in beta. Legacy content-specific settings
-remain only for safe migration and must not reappear as a UI model or a runtime
+Track Number is retired from v1. Legacy stored selections are migrated to
+supported local fields and must not reappear as a UI model or a runtime
 precedence layer.
 
 Immediate reading means effective delay and minimum-playback duration are zero;

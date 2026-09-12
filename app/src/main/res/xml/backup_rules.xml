@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 6-11 Auto Backup rules. Keep user settings, but not transient media/device state. -->
+<full-backup-content>
+    <exclude domain="file" path="datastore/trackvoice_private_state.preferences_pb" />
+</full-backup-content>

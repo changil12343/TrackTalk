@@ -72,16 +72,6 @@ import com.trackvoice.media.AlbumTrackNumberResolver
 import com.trackvoice.media.TemporalPlaybackContextResolver
 import com.trackvoice.media.NextTrackPrefetch
 import com.trackvoice.media.PreparedNextTrack
-import com.trackvoice.metadata.ExternalMetadataCacheEntry
-import com.trackvoice.metadata.ExternalMetadataCachePolicy
-import com.trackvoice.metadata.ExternalMetadataStatus
-import com.trackvoice.metadata.ExternalTrackMetadata
-import com.trackvoice.metadata.ExternalTrackMetadataQuery
-import com.trackvoice.metadata.ExternalTrackMetadataResolver
-import com.trackvoice.metadata.isDurationCompatible
-import com.trackvoice.metadata.ItunesTrackMetadataResolver
-import com.trackvoice.metadata.toCacheEntry
-import com.trackvoice.metadata.toResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -90,7 +80,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -215,7 +204,6 @@ class TrackVoiceController(
     context: Context,
     val repository: DataStoreRepository,
     private val premiumState: StateFlow<PremiumState>,
-    private val externalMetadataResolver: ExternalTrackMetadataResolver = ItunesTrackMetadataResolver(),
 ) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -270,8 +258,6 @@ class TrackVoiceController(
     private var deviceAutoActivated = false
     private var audioDeviceSnapshotGeneration = 0L
     private var latestConnectedAudioDevices: List<ConnectedAudioDevice> = emptyList()
-    private val externalMetadataCache = mutableMapOf<String, ExternalMetadataCacheEntry>()
-    private val externalMetadataLookupJobs = mutableMapOf<String, Job>()
     private val latencyCycleByRestoreCycleId = mutableMapOf<Long, String>()
 
     private val _mediaState = MutableStateFlow(MediaUiState())
@@ -319,6 +305,7 @@ class TrackVoiceController(
             }
         }
         scope.launch(Dispatchers.IO) {
+            repository.migratePrivatePlaybackStateForBackup()
             val persisted = runCatching { repository.currentPersistedAnnouncement() }.getOrNull()
             withContext(Dispatchers.Main.immediate) {
                 if (persisted != null) restorePersistedAnnouncement(persisted)
@@ -334,6 +321,7 @@ class TrackVoiceController(
         }
         scope.launch(Dispatchers.IO) { repository.migrateAnnouncementVolumeMode() }
         scope.launch(Dispatchers.IO) {
+            repository.migrateRetiredTrackNumberState()
             repository.migrateContentReadDefaults()
             repository.migrateContentReadOrder()
             repository.migrateLegacyAppAnnouncementSettings()
@@ -756,9 +744,6 @@ class TrackVoiceController(
         sameTrackRestartBoundary = null
         preparedNextTrack = null
         preparedNextAnnouncement = null
-        externalMetadataLookupJobs.values.forEach(Job::cancel)
-        externalMetadataLookupJobs.clear()
-        externalMetadataCache.clear()
         latencyCycleByRestoreCycleId.clear()
         duplicateSuppressor.clear()
         temporalContextResolver.reset()
@@ -1390,11 +1375,10 @@ class TrackVoiceController(
 
     private fun processMediaUpdate(update: MediaMonitorUpdate) {
         val processingStartedAtElapsedNanos = SystemClock.elapsedRealtimeNanos()
-        var event = update.selected?.event?.let(::applyExternalMetadataOverride)
+        var event = update.selected?.event
         val settings = effectiveSettings()
         val incomingSessionKey = update.selected?.sessionKey
         val incomingControllerGeneration = update.selected?.controllerGeneration
-        event?.let { requestExternalMetadata(it) }
         val previousSessionKey = lastEventSessionKey
         val previousControllerGeneration = selectedControllerGeneration
         if (incomingSessionKey != null && incomingSessionKey != previousSessionKey) {
@@ -2388,11 +2372,10 @@ class TrackVoiceController(
         pendingAnnouncementEvent = event
         val pendingToken = ++pendingAnnouncementToken
         val announcementTraceId = latencyCycleId ?: "m${monitorGeneration}-a$pendingToken"
-        val metadataSettlementDelay = when {
-            decision.formatOptions.readTrackNumber && AlbumTrackNumberResolver.resolve(event) == null ->
-                EXTERNAL_METADATA_SETTLE_DELAY_MS
-            needsMetadataSettlement(event, decision) -> METADATA_SETTLE_DELAY_MS
-            else -> 0L
+        val metadataSettlementDelay = if (needsMetadataSettlement(event, decision)) {
+            METADATA_SETTLE_DELAY_MS
+        } else {
+            0L
         }
         val scheduledDelayMs = maxOf(decision.delayMs, metadataSettlementDelay)
         val preparationDelayMs = AnnouncementAudioTiming.preparationDelayMs(
@@ -3436,232 +3419,6 @@ class TrackVoiceController(
             "voiceResolutionPrepared" to (preparedNextAnnouncement?.voicePlan != null),
             "preparedAt" to candidate.preparedAt,
         )
-        if (effectiveSettings().defaultReadFields.contains(AnnouncementReadField.TRACK_NUMBER) &&
-            candidate.trackNumber == null &&
-            !candidate.title.isNullOrBlank()
-        ) {
-            requestExternalMetadata(
-                query = ExternalTrackMetadataQuery(
-                    title = candidate.title,
-                    artist = candidate.artist,
-                    album = candidate.album,
-                    durationMs = null,
-                ),
-                predicted = candidate,
-            )
-        }
-    }
-
-    private fun requestExternalMetadata(event: PlaybackEvent) {
-        val settings = effectiveSettings()
-        if (!settings.defaultReadFields.contains(AnnouncementReadField.TRACK_NUMBER)) return
-        if (AlbumTrackNumberResolver.resolve(event) != null || event.title.isNullOrBlank()) return
-        requestExternalMetadata(
-            query = ExternalTrackMetadataQuery(
-                title = event.title,
-                artist = event.artist,
-                album = event.album,
-                durationMs = event.duration,
-            ),
-        )
-    }
-
-    /**
-     * Runs only metadata work. This job never pauses/ducks music and never
-     * speaks; a result that arrives after the current utterance is cache-only.
-     */
-    private fun requestExternalMetadata(
-        query: ExternalTrackMetadataQuery,
-        predicted: PreparedNextTrack? = null,
-    ) {
-        if (query.title.isBlank()) return
-        val cacheKey = query.cacheKey()
-        val now = System.currentTimeMillis()
-        val memoryEntry = externalMetadataCache[cacheKey]
-        if (memoryEntry != null &&
-            ExternalMetadataCachePolicy.isFresh(memoryEntry, now) &&
-            memoryEntry.isDurationCompatible(query.durationMs)
-        ) {
-            applyExternalMetadata(cacheKey, query, memoryEntry, predicted, fromCache = true)
-            return
-        }
-        if (externalMetadataLookupJobs.containsKey(cacheKey)) return
-
-        val job = scope.launch {
-            TrackTalkDebugLog.event(
-                "EXTERNAL_METADATA_LOOKUP_STARTED",
-                "provider" to "ITUNES_SEARCH",
-                "cacheKey" to cacheKey,
-                "title" to query.title,
-                "artist" to query.artist,
-                "album" to query.album,
-                "durationMs" to query.durationMs,
-                "predicted" to (predicted != null),
-            )
-            val persisted = runCatching {
-                withContext(Dispatchers.IO) { repository.readExternalMetadataCache(cacheKey) }
-            }.getOrNull()
-            val persistedNow = System.currentTimeMillis()
-            if (persisted != null &&
-                ExternalMetadataCachePolicy.isFresh(persisted, persistedNow) &&
-                persisted.isDurationCompatible(query.durationMs)
-            ) {
-                externalMetadataCache[cacheKey] = persisted
-                applyExternalMetadata(cacheKey, query, persisted, predicted, fromCache = true)
-                return@launch
-            }
-
-            val result = withTimeoutOrNull(EXTERNAL_METADATA_TIMEOUT_MS) {
-                runCatching {
-                    externalMetadataResolver.resolve(
-                        title = query.title,
-                        artist = query.artist,
-                        album = query.album,
-                        durationMs = query.durationMs,
-                    )
-                }.getOrElse {
-                    com.trackvoice.metadata.ExternalTrackMetadataResult(
-                        status = ExternalMetadataStatus.FAILED,
-                        provider = "ITUNES_SEARCH",
-                    )
-                }
-            } ?: com.trackvoice.metadata.ExternalTrackMetadataResult(
-                status = ExternalMetadataStatus.FAILED,
-                provider = "ITUNES_SEARCH",
-            )
-            val entry = result.toCacheEntry(System.currentTimeMillis())
-            externalMetadataCache[cacheKey] = entry
-            runCatching {
-                withContext(Dispatchers.IO) { repository.writeExternalMetadataCache(cacheKey, entry) }
-            }
-            applyExternalMetadata(cacheKey, query, entry, predicted, fromCache = false)
-        }
-        externalMetadataLookupJobs[cacheKey] = job
-        job.invokeOnCompletion {
-            scope.launch {
-                if (externalMetadataLookupJobs[cacheKey] === job) {
-                    externalMetadataLookupJobs.remove(cacheKey)
-                }
-            }
-        }
-    }
-
-    private fun applyExternalMetadata(
-        cacheKey: String,
-        query: ExternalTrackMetadataQuery,
-        entry: ExternalMetadataCacheEntry,
-        predicted: PreparedNextTrack?,
-        fromCache: Boolean,
-    ) {
-        val result = entry.toResult()
-        if (!entry.isDurationCompatible(query.durationMs)) {
-            TrackTalkDebugLog.event(
-                "EXTERNAL_METADATA_AMBIGUOUS",
-                "provider" to result.provider,
-                "reason" to "DURATION_MISMATCH_CACHE",
-                "queryDurationMs" to query.durationMs,
-                "cachedDurationMs" to entry.durationMs,
-                "cacheKey" to cacheKey,
-            )
-            return
-        }
-        TrackTalkDebugLog.event(
-            if (fromCache) "EXTERNAL_METADATA_CACHE_HIT" else "EXTERNAL_METADATA_LOOKUP_RESULT",
-            "provider" to result.provider,
-            "status" to result.status,
-            "confidence" to result.confidence,
-            "trackNumber" to result.metadata?.trackNumber,
-            "trackCount" to result.metadata?.trackCount,
-            "discNumber" to result.metadata?.discNumber,
-            "cacheKey" to cacheKey,
-            "predicted" to (predicted != null),
-        )
-        val metadata = result.metadata
-        if (metadata == null || result.status != ExternalMetadataStatus.MATCHED) {
-            if (result.status == ExternalMetadataStatus.AMBIGUOUS) {
-                TrackTalkDebugLog.event(
-                    "EXTERNAL_METADATA_AMBIGUOUS",
-                    "provider" to result.provider,
-                    "confidence" to result.confidence,
-                    "cacheKey" to cacheKey,
-                )
-            }
-            return
-        }
-
-        preparedNextTrack = preparedNextTrack?.let { prepared ->
-            val preparedKey = ExternalTrackMetadataQuery(
-                title = prepared.title.orEmpty(),
-                artist = prepared.artist,
-                album = prepared.album,
-                durationMs = null,
-            ).cacheKey()
-            if (preparedKey == cacheKey && prepared.trackNumber == null) {
-                prepared.copy(
-                    trackNumber = metadata.trackNumber,
-                    quality = if (
-                        !prepared.title.isNullOrBlank() &&
-                        !prepared.artist.isNullOrBlank() &&
-                        !prepared.album.isNullOrBlank()
-                    ) {
-                        com.trackvoice.media.NextTrackPrefetchQuality.FULL
-                    } else {
-                        com.trackvoice.media.NextTrackPrefetchQuality.PARTIAL
-                    },
-                    availableFields = prepared.availableFields + com.trackvoice.media.NextTrackMetadataField.TRACK_NUMBER,
-                )
-            } else {
-                prepared
-            }
-        }
-        preparedNextTrack?.let { prepared ->
-            preparedNextAnnouncement = prepareNextAnnouncement(prepared, effectiveSettings())
-        }
-
-        val current = _mediaState.value.currentEvent
-        if (current != null && currentMetadataQuery(current).cacheKey() == cacheKey) {
-            val enriched = current.withExternalMetadata(metadata)
-            _mediaState.value = _mediaState.value.copy(currentEvent = enriched)
-            pendingAnnouncementEvent = pendingAnnouncementEvent?.let { pending ->
-                if (currentMetadataQuery(pending).cacheKey() == cacheKey) pending.withExternalMetadata(metadata) else pending
-            }
-            TrackTalkDebugLog.event(
-                "TRACK_NUMBER_RESOLUTION",
-                "value" to metadata.trackNumber,
-                "source" to "EXTERNAL_CATALOG",
-                "provider" to metadata.provider,
-                "confidence" to metadata.confidence,
-                "cacheKey" to cacheKey,
-            )
-        }
-    }
-
-    private fun applyExternalMetadataOverride(event: PlaybackEvent): PlaybackEvent {
-        val entry = externalMetadataCache[currentMetadataQuery(event).cacheKey()] ?: return event
-        if (!ExternalMetadataCachePolicy.isFresh(entry, System.currentTimeMillis())) return event
-        if (!entry.isDurationCompatible(event.duration)) return event
-        return entry.toResult().metadata?.let { metadata -> event.withExternalMetadata(metadata) } ?: event
-    }
-
-    private fun currentMetadataQuery(event: PlaybackEvent): ExternalTrackMetadataQuery = ExternalTrackMetadataQuery(
-        title = event.title.orEmpty(),
-        artist = event.artist,
-        album = event.album,
-        durationMs = event.duration,
-    )
-
-    private fun PlaybackEvent.withExternalMetadata(metadata: ExternalTrackMetadata): PlaybackEvent {
-        val keepReliablePlayerNumber = trackNumber != null && trackNumberReliable
-        return copy(
-            title = title ?: metadata.canonicalTitle,
-            artist = artist ?: metadata.canonicalArtist,
-            album = album ?: metadata.canonicalAlbum,
-            trackNumber = if (keepReliablePlayerNumber) trackNumber else metadata.trackNumber,
-            totalTracks = totalTracks ?: metadata.trackCount,
-            discNumber = discNumber ?: metadata.discNumber,
-            trackNumberReliable = true,
-            trackNumberSource = if (keepReliablePlayerNumber) trackNumberSource else TrackNumberSource.EXTERNAL_CATALOG,
-        )
     }
 
     private fun prepareNextAnnouncement(
@@ -3798,8 +3555,6 @@ class TrackVoiceController(
 
     private companion object {
         const val METADATA_SETTLE_DELAY_MS = 250L
-        const val EXTERNAL_METADATA_SETTLE_DELAY_MS = 450L
-        const val EXTERNAL_METADATA_TIMEOUT_MS = 600L
         // One bounded retry is enough to distinguish Samsung's transient
         // stale speaker route from a deliberate phone-speaker selection.
         const val ROUTE_CONFLICT_RECHECK_DELAY_MS = 180L

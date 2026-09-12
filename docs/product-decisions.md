@@ -39,20 +39,21 @@ available order: Title → Artist → Album
 
 Artist and Album append after currently active fields when enabled. Active
 chips can be long-press dragged to reorder. The UI must not auto-scroll to an
-inactive chip when a selected chip is turned off. Track Number exists in the
-internal model but is hidden in the beta surface until factual enrichment is a
-shippable, user-verifiable promise.
+inactive chip when a selected chip is turned off. Track Number is retired from
+the v1 surface; a legacy stored selection is normalized to supported local
+fields during migration.
 
 ## Metadata policy
 
-- Use player-provided title, artist, album, and track number when available.
+- Use player-provided title, artist, and album when available for v1
+  announcements.
 - Accept `DISPLAY_TITLE`/`DISPLAY_SUBTITLE` and compatible queue descriptions
   when canonical MediaMetadata keys are absent.
-- Never treat queue position or songs heard in a session as canonical album
-  track number.
-- An absent/ambiguous number is omitted; a wrong number is worse.
-- External canonical metadata is a conservative optional enrichment path, not
-  a dependency for normal title/artist/album announcements.
+- Never treat queue position or songs heard in a session as canonical track
+  number. Local track numbers remain diagnostic metadata only; they are not a
+  v1 reading field.
+- An absent/ambiguous value is omitted; TrackTalk never queries an external
+  catalog to fill it.
 
 ## Free and Plus
 
@@ -89,10 +90,18 @@ notification/Quick Settings interaction.
 ## Privacy and feedback
 
 No user account, analytics SDK, general-notification parsing, playback-history
-upload, or music streaming belongs in the product boundary. The production
-feedback action opens an `ACTION_SENDTO` `mailto:` intent with only app
-version/build, Android version, and device model prefilled. It never attaches
-logs, tracks, settings, or history.
+upload, music streaming, or TrackTalk-owned metadata backend belongs in the
+product boundary. Current media information is used locally for TrackTalk
+features and announcement text; selected Android TTS engines receive the text
+needed to synthesize speech, some selected voices may use network processing,
+and provider policy governs that processing. Google Play handles purchases. The
+production feedback action opens an `ACTION_SENDTO` `mailto:` intent with only
+app version/build, Android version, and device model prefilled. It never
+attaches logs, tracks, settings, or history.
+
+The App info card exposes the privacy policy when the release operator supplies
+the public HTTPS URL through `tracktalk.privacyPolicyUrl`. An empty value is a
+visible release-configuration state, never a fabricated policy link.
 
 ## UI language versus speech language
 
